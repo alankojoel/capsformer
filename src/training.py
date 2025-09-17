@@ -67,8 +67,8 @@ class NMSEPLoss(nn.Module):
     def forward(self, input, target):
         power_input = torch.sum(input ** 2, axis=-1, keepdims=True)
         power_target = torch.sum(target ** 2, axis=-1, keepdims=True)
-        loss = (power_input - power_target) ** 2 #torch.sum((input - target) ** 2, axis=-1, keepdims=True)
-        loss = loss / (power_target ** 2 + 1e-8)
+        loss = (power_input - power_target) ** 2
+        loss = loss / (power_target + 1e-8)
         loss = torch.mean(loss)
         return loss
 
