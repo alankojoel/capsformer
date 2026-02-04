@@ -11,6 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
+import tikzplotlib
+from src.utils import plot_couplings
 
 class Capsule(nn.Module):
     """
@@ -180,6 +182,7 @@ class DeepBeamformer(nn.Module):
         x = self.conv_layers(scm) 
         x = self.prim_caps(x)
         x, r1 = self.capsule_1(x)
+        #plot_couplings(r1.squeeze(0))
         length = x.norm(dim=-1)
         length = length / (length.sum(dim=-1, keepdim=True) + 1e-8)
 
@@ -192,10 +195,163 @@ class DeepBeamformer(nn.Module):
 
         for i in range(K):
             y = Variable(torch.zeros(length.size()).scatter_(1, index[:,i].view(-1, 1).cpu(), 1.).to(x.device))
+            #print((x[:, index[:,i]]))
+            #fig, ax = plt.subplots(figsize=(10, 6))
+            #plt.stem((x[:, index[:,i]]).squeeze(0,1).detach().numpy())
+            #plt.show()
+            #tikzplotlib.save("caps_elements.tex")
+            #fig.savefig("caps_elements.pdf", bbox_inches="tight")
             c = self.fc_layers((x * y[:, :, None]).view(x.size(0), -1))
             W[:, :, i] = self.pred_head(c).squeeze(-1)
 
         return W, length
+
+class Encoder(nn.Module):
+    """
+    Encoder part of the INCM reconstruction network
+    """
+    def __init__(self):
+        super().__init__()
+        self.conv64 = nn.Sequential(
+            nn.Conv2d(4, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(),
+
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU()
+        )
+
+        self.mp64 = nn.MaxPool2d(kernel_size=2)
+
+        self.conv128 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(),
+
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU()
+        )
+
+        self.mp128 = nn.MaxPool2d(kernel_size=2)
+
+        self.conv256 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3)
+        )
+
+    def forward(self, x):
+        x = self.conv64(x)
+        skip1 = x
+        x = self.mp64(x)
+        x = self.conv128(x)
+        skip2 = x
+        x = self.mp128(x)
+        x = self.conv256(x)
+
+        return x, skip1, skip2
+
+
+class Decoder(nn.Module):
+    """
+    Decoder part of the INCM reconstruction network
+    """
+    def __init__(self):
+        super().__init__()
+
+        self.conv256 = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU()
+        )
+
+        self.skipconv128 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3)
+        )
+
+        self.deconv256 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2, padding=0)
+
+        self.conv128 = nn.Sequential(
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(),
+        )
+
+        self.deconv128 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, padding=0)
+
+        self.skipconv64 = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3)
+        )
+
+        self.conv64 = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
+        )
+
+    def forward(self, x, skip1, skip2):
+        x = self.conv256(x)
+
+        skip2 = self.skipconv128(skip2)
+        x = self.deconv256(x)
+        x = torch.cat([skip2,  x], dim=1)
+
+        x = self.conv128(x)
+
+        skip1 = self.skipconv64(skip1)
+        x = self.deconv128(x)
+        x = torch.cat([skip1,  x], dim=1)
+
+        x = self.conv64(x)
+        
+        return x
+
+class ConjugateSymmetrization(nn.Module):
+    """
+    Conjugate symmetrization layer of the INCM reconstruction network
+    """
+    def forward(self, Q):
+        # Q: (B, 2, M, M)
+        Q_real = Q[:, 0]           # (B, M, M)
+        Q_imag = Q[:, 1]           # (B, M, M)
+
+        Q_real_T = Q_real.transpose(-1, -2)
+        Q_imag_T = Q_imag.transpose(-1, -2)
+
+        V_real = 0.5 * (Q_real + Q_real_T)
+        V_imag = 0.5 * (Q_imag - Q_imag_T)
+
+        V = torch.stack([V_real, V_imag], dim=1)
+        return V
+
+
+class DeepReconstructionNet(nn.Module):
+    """
+    Deep INCM reconstruction network
+    """
+    def __init__(self):
+        super().__init__()
+
+        self.enc = Encoder()
+        self.dec = Decoder()
+        self.conj_symm = ConjugateSymmetrization()
+
+    def forward(self, x):
+        x, skip1, skip2 = self.enc(x)
+        x = self.dec(x, skip1, skip2)
+        x = self.conj_symm(x)
+        return x
     
 class ULA:
     """
@@ -255,7 +411,7 @@ class ULA:
             angle_grid = np.arange(-90,90,dtheta)
             DOA, _ = self.compute_SCB(SCM, angle_grid, K)
 
-        SCM_inv = solve(SCM, np.eye(SCM.shape[0]), assume_a='hermitian')
+        SCM_inv = solve(SCM, np.eye(SCM.shape[0])) #, assume_a='hermitian')
         a = self.steering_vector(DOA)
 
         if len(DOA) == 1:
@@ -268,9 +424,11 @@ class ULA:
                 w_i = SCM_inv @ a_i / (a_i.conj().T @ SCM_inv @ a_i)
                 w[:,i] = w_i.reshape(-1)
             
-        return w.conj().T @ X
+        return w #w.conj().T @ X
 
     def estimate_mmse(self, X, K, qamma, DOA=None):
+        """
+        """
         SCM = self.compute_SCM(X)
 
         if DOA is None:
@@ -279,12 +437,12 @@ class ULA:
             angle_grid = np.arange(-90,90,dtheta)
             DOA, _ = self.compute_MUSIC(SCM, angle_grid, K)
 
-        SCM_inv = solve(SCM, np.eye(SCM.shape[0]), assume_a='hermitian')
+        SCM_inv = solve(SCM, np.eye(SCM.shape[0])) #, assume_a='hermitian')
         a = self.steering_vector(DOA)
 
         w = SCM_inv @ a
-
-        return qamma * np.eye(a.shape[1]) @ w.conj().T @ X
+        
+        return (qamma * np.eye(a.shape[1]) @ w.T).T #qamma * np.eye(a.shape[1]) @ w.conj().T @ X
     
     def compute_SCB(self, SCM, angle_grid, K):
         """
@@ -376,9 +534,10 @@ class ULA:
 
         DOA_est = dbf.find_top_k_peaks(DOA_dist, K).detach().numpy() - 90
         DOA_dist = DOA_dist.squeeze(0).detach().numpy()
-        S = W.conj().T @ X
+
+        #S = W.conj().T @ X
        
-        return S, DOA_est, DOA_dist
+        return W, DOA_est, DOA_dist
 
 
     def dbf_caps_output(self, SCM, K, model_dir, DOA):
@@ -396,3 +555,48 @@ class ULA:
         out = dbf.capsule_output(SCM, K, DOA)
 
         return out
+    
+    def estimate_dirn(self, X, K, model_dir, DOA=None):
+        """
+        """
+        try:
+            dirn = DeepReconstructionNet()
+            id = self.data_id()
+            dirn_path = os.path.abspath(model_dir)
+            dirn.load_state_dict(torch.load(dirn_path + "/deepincmreconstnet" + id + ".pt", map_location=torch.device('cpu')))
+        except FileNotFoundError:
+            raise Exception("Trained deep INCM reconstruction net doesn't exist")
+        
+        dirn.eval()
+        SCM = self.compute_SCM(X)
+
+        if DOA is None:
+            Gr_size = 181
+            dtheta= 180/(Gr_size-1)          
+            angle_grid = np.arange(-90,90,dtheta)
+            DOA, _ = self.compute_SCB(SCM, angle_grid, K)
+
+        #SCM = self.M * SCM / np.trace(SCM)
+
+        if K == 1:
+            SCM = np.stack([SCM.real, SCM.imag, np.angle(SCM), np.full(SCM.shape, DOA)], axis=0)
+            SCM = torch.tensor(SCM, dtype=torch.float32).unsqueeze(0)
+            INCM_est = dirn(SCM)
+            INCM_est = INCM_est.squeeze(0).detach().numpy()
+            INCM_est = INCM_est[0] + 1j * INCM_est[1]
+
+            a = self.steering_vector(DOA)
+            w = INCM_est @ a / (a.conj().T @ INCM_est @ a)
+        else:
+            w = np.zeros((SCM.shape[0], K)).astype('complex64')
+            for i in range(K):
+                SCM_i = np.stack([SCM.real, SCM.imag, np.angle(SCM), np.full(SCM.shape, DOA[i])], axis=0)
+                SCM_i = torch.tensor(SCM_i, dtype=torch.float32).unsqueeze(0)
+                INCM_est = dirn(SCM_i)
+                INCM_est = INCM_est.squeeze(0).detach().numpy()
+                INCM_est = INCM_est[0] + 1j * INCM_est[1]
+
+                a = self.steering_vector(DOA[i])
+                w[:,i] = (INCM_est @ a / (a.conj().T @ INCM_est @ a)).reshape(-1)
+       
+        return w

@@ -68,7 +68,7 @@ class NMSEPLoss(nn.Module):
         power_input = torch.sum(input ** 2, axis=-1, keepdims=True)
         power_target = torch.sum(target ** 2, axis=-1, keepdims=True)
         loss = (power_input - power_target) ** 2 #torch.sum((input - target) ** 2, axis=-1, keepdims=True)
-        loss = loss / (power_target ** 2 + 1e-8)
+        loss = loss / (power_target + 1e-8)
         loss = torch.mean(loss)
         return loss
 
@@ -332,8 +332,7 @@ class Trainer:
         B, C = k_hot.shape
         idxs = torch.arange(C).unsqueeze(0).repeat(C, 1) 
         centers = torch.arange(C).unsqueeze(1)            
-        laplace_kernel = torch.exp(-torch.abs(idxs - centers) / scale)
-        laplace_kernel = laplace_kernel / laplace_kernel.sum(dim=1, keepdim=True)
+        laplace_kernel = torch.exp(-torch.abs(idxs - centers) / scale) / (2*scale)
     
         smoothed = torch.matmul(k_hot, laplace_kernel.to(k_hot.device)) 
                 

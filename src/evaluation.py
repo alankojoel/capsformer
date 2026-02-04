@@ -37,7 +37,8 @@ class Tester:
     def estimate_SOI(self, arr, DOA, K, DOA_SOI_true, DOA_SOI_est, SNR, rng=None):
         """
         """
-        SOI_est = np.empty((3, len(SNR)), dtype=object)
+        W_est = np.empty((4, len(SNR)), dtype=object)
+        SOI_est = np.empty((4, len(SNR)), dtype=object)
         SOI_true = np.empty(len(SNR), dtype=object)
 
         for i, SNR_i in enumerate(SNR):
@@ -47,11 +48,33 @@ class Tester:
                 SNR_i = SNR_i[np.where(np.isin(DOA, DOA_SOI_true))[0]]
             else:
                 SOI_true[i] = S
-            SOI_est[0][i] = arr.estimate_capon(X, K, DOA_SOI_est)
-            SOI_est[1][i] = arr.estimate_mmse(X, K, 10**(SNR_i/10), DOA_SOI_est)
-            SOI_est[2][i], _, _ = arr.estimate_dbf(X, K, self.model_dir, DOA_SOI_est)
+            w_capon = arr.estimate_capon(X, K, DOA_SOI_est)
+            w_mmse = arr.estimate_mmse(X, K, 10**(SNR_i/10), DOA_SOI_est)
+            w_dirn = arr.estimate_dirn(X, K, self.model_dir, DOA_SOI_est)
+            w_dbf, _, _ = arr.estimate_dbf(X, K, self.model_dir, DOA_SOI_est)
+            W_est[0][i] = w_capon
+            W_est[1][i] = w_mmse
+            W_est[2][i] = w_dirn
+            W_est[3][i] = w_dbf
+            SOI_est[0][i] = w_capon.conj().T @ X
+            SOI_est[1][i] = w_mmse.conj().T @ X
+            SOI_est[2][i] = w_dirn.conj().T @ X
+            SOI_est[3][i] = w_dbf.conj().T @ X
+            """
+            qamma = 10**(SNR[i]/10)
+            j = np.where(np.isin(DOA, DOA_SOI_true))[0]
+            A = arr.steering_vector(DOA)
+            a = arr.steering_vector(DOA_SOI_true)
+            Q = np.delete(A, j, axis=1) @ np.diag(np.delete(qamma, j)) @ np.delete(A, j, axis=1).conj().T + np.eye(A.shape[0])
+            iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
+            w_opt = iQ @ a / (a.conj().T @ iQ @ a)
+            """
+            #SINR_cap.append((10*np.log10((10**(SNR_i/10) * np.abs(w_capon.conj().T @ a)**2) / np.real(w_capon.conj().T @ Q @ w_capon))).item())
+            #SINR_mmse.append((10*np.log10((10**(SNR_i/10) * np.abs(w_mmse.conj().T @ a)**2) / np.real(w_mmse.conj().T @ Q @ w_mmse))).item())
+            #SINR_dbf.append((10*np.log10((10**(SNR_i/10) * np.abs(w_dbf.conj().T @ a)**2) / np.real(w_dbf.conj().T @ Q @ w_dbf))).item())
+            #SINR_opt.append((10*np.log10((10**(SNR_i/10) * np.abs(w_opt.conj().T @ a)**2) / np.real(w_opt.conj().T @ Q @ w_opt))).item())
 
-        return SOI_est, SOI_true
+        return W_est, SOI_est, SOI_true
     
     def estimate_single_sample(self, arr, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, rng=None):
         """
@@ -59,6 +82,9 @@ class Tester:
         if rng is None:
             rng = np.random.default_rng(self.random_state)
 
+        DOAs_SOI_true = []
+        DOAs_SOI_est = []
+        Ws_est = []
         SOIs_est = []
         SOIs_true = []
 
@@ -75,30 +101,80 @@ class Tester:
                 DOA_SOI_i_true = None
                 DOA_SOI_i_est = None
                 K = len(DOA_i)
-            SOI_i_est, SOI_i_true = self.estimate_SOI(arr, DOA_i, K, DOA_SOI_i_true, DOA_SOI_i_est, SNRs, rng=rng)
+            W_i_est, SOI_i_est, SOI_i_true = self.estimate_SOI(arr, DOA_i, K, DOA_SOI_i_true, DOA_SOI_i_est, SNRs, rng=rng)
+            DOAs_SOI_true.append(DOA_SOI_i_true)
+            DOAs_SOI_est.append(DOA_SOI_i_est)
+            Ws_est.append(W_i_est)
             SOIs_est.append(SOI_i_est)
             SOIs_true.append(SOI_i_true)
 
+        DOAs_SOI_true = np.array(DOAs_SOI_true)
+        DOAs_SOI_est = np.array(DOAs_SOI_est)
+        Ws_est = np.array(Ws_est)
         SOIs_est = np.array(SOIs_est)
         SOIs_true = np.array(SOIs_true)
 
+        SINR = self.compute_SINR(arr, SNRs, Ws_est, DOAs, DOAs_SOI_true)
         NMSE = self.compute_NMSE(SNRs, SOIs_true, SOIs_est)
         BIAS = self.compute_BIAS(SNRs, SOIs_true, SOIs_est)
 
-        return NMSE, BIAS
+        return SINR, NMSE, BIAS
 
+    def compute_SINR(self, arr, SNRs, Ws_est, DOAs, DOAs_SOI_true):
+        """
+        """
+        SINR =  [[] for _ in range(5)]
+        
+        num_DOA = Ws_est.shape[0] if Ws_est[0][0][0].shape[1] == 1 else Ws_est[0][0][0].shape[1]
+
+        for i in range(5): 
+            SINR[i]= np.zeros((num_DOA, len(SNRs)))
+
+        for i in range(len(DOAs)):
+            DOA_i = DOAs[i]
+            DOA_SOI_i_true = DOAs_SOI_true[i]
+            A = arr.steering_vector(DOA_i)
+            for j in range(len(SNRs)):
+                SNR_j = SNRs[j]
+                qamma_j = 10**(SNR_j/10)
+                if DOA_SOI_i_true is not None:
+                    for k in range(len(DOA_SOI_i_true)):
+                        l = np.where(np.isin(DOA_i, DOA_SOI_i_true[k]))[0]
+                        a = arr.steering_vector(DOA_SOI_i_true[k])
+                        Q = np.delete(A, l, axis=1) @ np.diag(np.delete(qamma_j, l)) @ np.delete(A, l, axis=1).conj().T + np.eye(A.shape[0])
+                        iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
+                        w_opt = iQ @ a / (a.conj().T @ iQ @ a)
+                        SINR[0][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i+k][0][j].conj().T @ a)**2) / np.real(Ws_est[i+k][0][j].conj().T @ Q @ Ws_est[i+k][0][j])).item()
+                        SINR[1][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i+k][1][j].conj().T @ a)**2) / np.real(Ws_est[i+k][1][j].conj().T @ Q @ Ws_est[i+k][1][j])).item()
+                        SINR[2][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i+k][2][j].conj().T @ a)**2) / np.real(Ws_est[i+k][2][j].conj().T @ Q @ Ws_est[i+k][2][j])).item()
+                        SINR[3][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i+k][3][j].conj().T @ a)**2) / np.real(Ws_est[i+k][3][j].conj().T @ Q @ Ws_est[i+k][3][j])).item()
+                        SINR[4][i+k][j] = ((qamma_j[l] * np.abs(w_opt.conj().T @ a)**2) / np.real(w_opt.conj().T @ Q @ w_opt)).item()
+                else:
+                    for k in range(len(DOA_i)):
+                        l = np.where(np.isin(DOA_i, DOA_i[k]))[0]
+                        a = arr.steering_vector(DOA_i[k])
+                        Q = np.delete(A, l, axis=1) @ np.diag(np.delete(qamma_j, l)) @ np.delete(A, l, axis=1).conj().T + np.eye(A.shape[0])
+                        iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
+                        w_opt = iQ @ a / (a.conj().T @ iQ @ a)
+                        SINR[0][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i][0][j][:,k].conj().T @ a)**2) / np.real(Ws_est[i][0][j][:,k].conj().T @ Q @ Ws_est[i][0][j][:,k])).item()
+                        SINR[1][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i][1][j][:,k].conj().T @ a)**2) / np.real(Ws_est[i][1][j][:,k].conj().T @ Q @ Ws_est[i][1][j][:,k])).item()
+                        SINR[2][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i][2][j][:,k].conj().T @ a)**2) / np.real(Ws_est[i][2][j][:,k].conj().T @ Q @ Ws_est[i][2][j][:,k])).item()
+                        SINR[3][i+k][j] = ((qamma_j[l] * np.abs(Ws_est[i][3][j][:,k].conj().T @ a)**2) / np.real(Ws_est[i][3][j][:,k].conj().T @ Q @ Ws_est[i][3][j][:,k])).item()
+                        SINR[4][i+k][j] = ((qamma_j[l] * np.abs(w_opt.conj().T @ a)**2) / np.real(w_opt.conj().T @ Q @ w_opt)).item()
+
+        return np.array(SINR)
     
     def compute_NMSE(self, SNRs, SOIs_true, SOIs_est):
         """
         """
-        NMSE =  [[] for _ in range(3)]
+        NMSE =  [[] for _ in range(4)]
         
         num_DOA = SOIs_true.shape[0] if SOIs_true[0][0].shape[0] == 1 else SOIs_true[0][0].shape[0]
         
         if SOIs_true.shape[0] > 1:
             assert SOIs_true[0][0].shape[0] == 1
             
-        for i in range(3): 
+        for i in range(4): 
             NMSE[i]= np.zeros((num_DOA, len(SNRs)))
 
         for i in range(SOIs_true.shape[0]):
@@ -108,10 +184,12 @@ class Tester:
                     NMSE[0][i][j] = (np.mean(np.abs(SOIs_est[i][0][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
                     NMSE[1][i][j] = (np.mean(np.abs(SOIs_est[i][1][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
                     NMSE[2][i][j] = (np.mean(np.abs(SOIs_est[i][2][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
+                    NMSE[3][i][j] = (np.mean(np.abs(SOIs_est[i][3][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
                 else:
                     NMSE[0][:,j] = np.mean(np.abs(SOIs_est[i][0][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)
                     NMSE[1][:,j] = np.mean(np.abs(SOIs_est[i][1][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)
                     NMSE[2][:,j] = np.mean(np.abs(SOIs_est[i][2][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)
+                    NMSE[3][:,j] = np.mean(np.abs(SOIs_est[i][3][j] - SOI_true)**2, axis=1) / np.mean(np.abs(SOI_true)**2, axis=1)
 
         return np.array(NMSE)
 
@@ -150,13 +228,13 @@ class Tester:
     def compute_BIAS(self, SNRs, SOIs_true, SOIs_est):
         """
         """
-        BIAS =  [[] for _ in range(3)]
+        BIAS =  [[] for _ in range(4)]
 
         num_DOA = SOIs_true.shape[0] if  SOIs_true[0][0].shape[0] == 1 else SOIs_true[0][0].shape[0]
         if SOIs_true.shape[0] > 1:
             assert SOIs_true[0][0].shape[0] == 1
             
-        for i in range(3): 
+        for i in range(4): 
             BIAS[i]= np.zeros((num_DOA, len(SNRs)))
 
         for i in range(SOIs_true.shape[0]):
@@ -166,10 +244,12 @@ class Tester:
                     BIAS[0][i][j] = ((np.mean(np.abs(SOIs_est[i][0][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
                     BIAS[1][i][j] = ((np.mean(np.abs(SOIs_est[i][1][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
                     BIAS[2][i][j] = ((np.mean(np.abs(SOIs_est[i][2][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
+                    BIAS[3][i][j] = ((np.mean(np.abs(SOIs_est[i][3][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)).item()
                 else:
                     BIAS[0][:,j] = (np.mean(np.abs(SOIs_est[i][0][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)
                     BIAS[1][:,j] = (np.mean(np.abs(SOIs_est[i][1][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)
                     BIAS[2][:,j] = (np.mean(np.abs(SOIs_est[i][2][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)
+                    BIAS[3][:,j] = (np.mean(np.abs(SOIs_est[i][3][j])**2, axis=1) - np.mean(np.abs(SOI_true)**2, axis=1)) / np.mean(np.abs(SOI_true)**2, axis=1)
 
         return np.array(BIAS)
     
@@ -187,8 +267,9 @@ class Tester:
                 assert np.all(DOAs == DOAs_SOI)
                 DOAs_SOI = DOAs_SOI.reshape(-1,1)
             DOAs = DOAs.reshape(-1,1)
-            NMSE = np.zeros((3, DOAs.shape[0], len(SNRs)))
-            BIAS = np.zeros((3, DOAs.shape[0], len(SNRs)))
+            SINR = np.zeros((5, DOAs.shape[0], len(SNRs)))
+            NMSE = np.zeros((4, DOAs.shape[0], len(SNRs)))
+            BIAS = np.zeros((4, DOAs.shape[0], len(SNRs)))
         elif mode == "m":
             if DOAs_SOI is not None:
                 assert np.all(np.isin(DOAs_SOI, DOAs))
@@ -196,16 +277,18 @@ class Tester:
                 DOAs_SOI = DOAs_SOI.reshape(1,-1)
             else:
                 K = len(DOAs)
-            DOAs = DOAs.reshape(1,-1)        
-            NMSE = np.zeros((3, K, len(SNRs)))
-            BIAS = np.zeros((3, K, len(SNRs)))
+            DOAs = DOAs.reshape(1,-1) 
+            SINR = np.zeros((5, K, len(SNRs)))      
+            NMSE = np.zeros((4, K, len(SNRs)))
+            BIAS = np.zeros((4, K, len(SNRs)))
         else:
             raise Exception("Invalid mode.")
             
         pbar = tqdm(total=MC_trials, position=0, leave=True)
 
         for i in range(MC_trials):
-            NMSE_i, BIAS_i = self.estimate_single_sample(arr, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, rng=rng)
+            SINR_i, NMSE_i, BIAS_i = self.estimate_single_sample(arr, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, rng=rng)
+            SINR += SINR_i
             NMSE += NMSE_i
             BIAS += BIAS_i
             curr_NMSE_mean = np.mean(NMSE / (i + 1), axis=(1,2))
@@ -213,7 +296,7 @@ class Tester:
             DOA_s = ",".join(f"{DOAs[i]}" for i in range(DOAs.shape[0]))
             DOA_SOI_s = ",".join(f"{DOAs_SOI[i]}" for i in range(DOAs_SOI.shape[0])) if DOAs_SOI is not None else DOA_s
             SNR_s = ",".join(f"{SNRs[i]}" for i in range(SNRs.shape[0]))
-            desc = f'DOA: {DOA_s}, DOA_SOI: {DOA_SOI_s}, Apply perturbations: {DOAs_SOI_perturb}, MC trials: {i + 1}, Average NMSE: Capon Beamformer: {curr_NMSE_mean[0]:.4f}, MMSE Beamformer: {curr_NMSE_mean[1]:.4f}, Deep Beamformer: {curr_NMSE_mean[2]:.4f}, Average BIAS: Capon Beamformer: {curr_BIAS_mean[0]:.4f}, MMSE Beamformer: {curr_BIAS_mean[1]:.4f} Deep Beamformer: {curr_BIAS_mean[2]:.4f}' #SNR: {SNR_string}, 
+            desc = f'DOA: {DOA_s}, DOA_SOI: {DOA_SOI_s}, Apply perturbations: {DOAs_SOI_perturb}, MC trials: {i + 1}, Average NMSE: Capon Beamformer: {curr_NMSE_mean[0]:.4f}, MMSE Beamformer: {curr_NMSE_mean[1]:.4f}, Deep INCM Reconst Net: {curr_NMSE_mean[2]:.4f}, CapsFormer: {curr_NMSE_mean[3]:.4f} Average BIAS: Capon Beamformer: {curr_BIAS_mean[0]:.4f}, MMSE Beamformer: {curr_BIAS_mean[1]:.4f} Deep INCM Reconst Net: {curr_BIAS_mean[2]:.4f} CapsFormer: {curr_BIAS_mean[3]:.4f}' #SNR: {SNR_string}, 
             pbar.set_description(desc)  
             pbar.update()
 
@@ -221,7 +304,7 @@ class Tester:
 
         ESE = self.compute_ESE(arr, DOAs, DOAs_SOI, SNRs)
 
-        return NMSE / MC_trials, np.mean(NMSE / MC_trials, axis=2), ESE, np.mean(ESE, axis=2), BIAS / MC_trials, np.mean(BIAS / MC_trials, axis=2)
+        return SINR / MC_trials, np.mean(SINR / MC_trials, axis=2), NMSE / MC_trials, np.mean(NMSE / MC_trials, axis=2), ESE, np.mean(ESE, axis=2), BIAS / MC_trials, np.mean(BIAS / MC_trials, axis=2)
     
     def compare_metrics(self, mode, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, MC_trials=None):
         """ 
@@ -229,7 +312,7 @@ class Tester:
         if MC_trials is None:
             MC_trials = self.MC_trials
         
-        NMSE, NMSE_DOA, ESE, ESE_DOA, BIAS, BIAS_DOA = self.estimate_MC_trials(mode, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, MC_trials=MC_trials)
+        SINR, SINR_DOA, NMSE, NMSE_DOA, ESE, ESE_DOA, BIAS, BIAS_DOA = self.estimate_MC_trials(mode, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, MC_trials=MC_trials)
         
         test_path = os.path.abspath(self.test_dir)
         if not os.path.exists(test_path):
@@ -260,29 +343,80 @@ class Tester:
             
         log_stats(log_path, f"Monte Carlo trials: {MC_trials}")
         
+        log_stats(log_path, f"(SINR DOAs) Capon Beamformer: {', '.join(f'{x:.4f}' for x in SINR_DOA[0])}")
+        log_stats(log_path, f"(SINR DOAs) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in SINR_DOA[1])}")
+        log_stats(log_path, f"(SINR DOAs) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in SINR_DOA[2])}")
+        log_stats(log_path, f"(SINR DOAs) CapsFormer: {', '.join(f'{x:.4f}' for x in SINR_DOA[3])}")
+        log_stats(log_path, f"(SINR DOAs) Optimal: {', '.join(f'{x:.4f}' for x in SINR_DOA[4])}")
+
         log_stats(log_path, f"(NMSE DOAs) Capon Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[0])}")
         log_stats(log_path, f"(NMSE DOAs) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[1])}")
-        log_stats(log_path, f"(NMSE DOAs) Deep Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[2])}")
+        log_stats(log_path, f"(NMSE DOAs) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in NMSE_DOA[2])}")
+        log_stats(log_path, f"(NMSE DOAs) CapsFormer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[3])}")
         log_stats(log_path, f"(NMSE DOAs) Optimal: {', '.join(f'{x:.4f}' for x in ESE_DOA[1])}")
+
+        for i in range(DOAs_act.shape[0]):
+            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) Capon Beamformer: {', '.join(f'{x:.4f}' for x in SINR[0][i])}")
+            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in SINR[1][i])}")
+            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in SINR[2][i])}")
+            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) CapsFormer: {', '.join(f'{x:.4f}' for x in SINR[3][i])}")
+            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) Optimal: {', '.join(f'{x:.4f}' for x in SINR[4][i])}")
 
         for i in range(DOAs_act.shape[0]):
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Capon Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[0][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[1][i])}")
-            log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Deep Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[2][i])}")
+            log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in NMSE[2][i])}")
+            log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) CapsFormer: {', '.join(f'{x:.4f}' for x in NMSE[3][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Optimal: {', '.join(f'{x:.4f}' for x in ESE[1][i])}")
 
         log_stats(log_path, f"(BIAS DOAs) Capon Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[0])}")
         log_stats(log_path, f"(BIAS DOAs) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[1])}")
-        log_stats(log_path, f"(BIAS DOAs) Deep Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[2])}")
+        log_stats(log_path, f"(BIAS DOAs) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in BIAS_DOA[2])}")
+        log_stats(log_path, f"(BIAS DOAs) CapsFormer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[3])}")
 
         for i in range(DOAs_act.shape[0]):
             log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) Capon Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[0][i])}")
             log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[1][i])}")
-            log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) Deep Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[2][i])}")
+            log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in BIAS[2][i])}")
+            log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) CapsFormer: {', '.join(f'{x:.4f}' for x in BIAS[3][i])}")
+
+        self.plot_SINR(SINR_DOA, SINR, DOAs_act, DOAs_SOI_perturb, SNRs_act, test_path)
 
         self.plot_NMSE(NMSE_DOA, NMSE, ESE, ESE_DOA, DOAs_act, DOAs_SOI_perturb, SNRs_act, test_path)
 
         self.plot_BIAS(BIAS_DOA, BIAS, DOAs_act, DOAs_SOI_perturb, SNRs_act, test_path)
+    
+    def plot_SINR(self, SINR_DOA, SINR, DOAs, DOAs_SOI_perturb, SNRs, test_path):
+        """
+        """
+        fig, ax = plt.subplots(len(DOAs) + 1, 1, figsize=(6, (len(DOAs) + 1) * 6))
+
+        for i in range(len(DOAs) + 1):
+            if i == 0:
+                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[0]), marker="D", linestyle="none", label="Capon Beamformer")
+                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[1]), marker="o", linestyle="none", label="MMSE Beamformer")
+                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[2]), marker="s", linestyle="none", label="Deep INCM Reconst Net")
+                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[3]), marker="x", linestyle="none", label="CapsFormer")
+                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[4]), marker="+", linestyle="none", label="Optimal")
+                ax[i].set_title('SINR DOAs')
+                ax[i].set_ylabel('SINR')
+                ax[i].set_xlabel('DOA')
+                #ax[i].legend()
+                ax[i].grid(True, which='both', linestyle='--', linewidth=0.5)
+            else:
+                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[0][i-1]), marker="D", linestyle="none", label="Capon Beamformer")
+                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[1][i-1]), marker="o", linestyle="none", label="MMSE Beamformer")
+                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[2][i-1]), marker="s", linestyle="none", label="Deep INCM Reconst Net")
+                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[3][i-1]), marker="x", linestyle="none", label="CapsFormer")
+                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[4][i-1]), marker="+", linestyle="none", label="Optimal")
+                ax[i].set_title(f'SINR DOA={DOAs[i-1]}')
+                ax[i].set_ylabel('SINR')
+                ax[i].set_xlabel('SNR')
+                #ax[i].legend()
+                ax[i].grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        tikzplotlib.save(test_path + "/" + "DOA=" + str(DOAs) + "_DOA_SOI_perturb=" + str(DOAs_SOI_perturb) + "_test_SINR_plot.tex")
+        fig.savefig(test_path + "/" + "DOA=" + str(DOAs)+ "_DOA_SOI_perturb=" + str(DOAs_SOI_perturb) + "_test_SINR_plot.pdf", bbox_inches="tight")
     
     def plot_NMSE(self, NMSE_DOA, NMSE, ESE, ESE_DOA, DOAs, DOAs_SOI_perturb, SNRs, test_path):
         """
@@ -293,7 +427,8 @@ class Tester:
             if i == 0:
                 ax[i].plot(DOAs, NMSE_DOA[0], marker="D", linestyle="none", label="Capon Beamformer")
                 ax[i].plot(DOAs, NMSE_DOA[1], marker="o", linestyle="none", label="MMSE Beamformer")
-                ax[i].plot(DOAs, NMSE_DOA[2], marker="s", linestyle="none", label="Deep Beamformer")
+                ax[i].plot(DOAs, NMSE_DOA[2], marker="s", linestyle="none", label="Deep INCM Reconst Net")
+                ax[i].plot(DOAs, NMSE_DOA[3], marker="x", linestyle="none", label="CapsFormer")
                 ax[i].plot(DOAs, ESE_DOA[1], marker="+", linestyle="none", label="Optimal")
                 ax[i].set_title('NMSE DOAs')
                 ax[i].set_ylabel('SE-NMSE')
@@ -303,7 +438,8 @@ class Tester:
             else:
                 ax[i].plot(SNRs[:,i-1], NMSE[0][i-1], marker="D", linestyle="none", label="Capon Beamformer")
                 ax[i].plot(SNRs[:,i-1], NMSE[1][i-1], marker="o", linestyle="none", label="MMSE Beamformer")
-                ax[i].plot(SNRs[:,i-1], NMSE[2][i-1], marker="s", linestyle="none", label="Deep Beamformer")
+                ax[i].plot(SNRs[:,i-1], NMSE[2][i-1], marker="s", linestyle="none", label="Deep INCM Reconst Net")
+                ax[i].plot(SNRs[:,i-1], NMSE[3][i-1], marker="x", linestyle="none", label="CapsFormer")
                 ax[i].plot(SNRs[:,i-1], ESE[1][i-1], marker="+", linestyle="none", label="Optimal")
                 ax[i].set_title(f'NMSE DOA={DOAs[i-1]}')
                 ax[i].set_ylabel('SE-NMSE')
@@ -323,7 +459,8 @@ class Tester:
             if i == 0:
                 ax[i].plot(DOAs, BIAS_DOA[0], marker="D", linestyle="none", label="Capon Beamformer")
                 ax[i].plot(DOAs, BIAS_DOA[1], marker="o", linestyle="none", label="MMSE Beamformer")
-                ax[i].plot(DOAs, BIAS_DOA[2], marker="s", linestyle="none", label="Deep Beamformer")
+                ax[i].plot(DOAs, BIAS_DOA[2], marker="s", linestyle="none", label="Deep INCM Reconst Net")
+                ax[i].plot(DOAs, BIAS_DOA[3], marker="x", linestyle="none", label="CapsFormer")
                 ax[i].set_title('Bias DOAs')
                 ax[i].set_ylabel('Bias')
                 ax[i].set_xlabel('DOA')
@@ -332,7 +469,8 @@ class Tester:
             else:
                 ax[i].plot(SNRs[:,i-1], BIAS[0][i-1], marker="D", linestyle="none", label="Capon Beamformer")
                 ax[i].plot(SNRs[:,i-1], BIAS[1][i-1], marker="o", linestyle="none", label="MMSE Beamformer")
-                ax[i].plot(SNRs[:,i-1], BIAS[2][i-1], marker="s", linestyle="none", label="Deep Beamformer")
+                ax[i].plot(SNRs[:,i-1], BIAS[2][i-1], marker="s", linestyle="none", label="Deep INCM Reconst Net")
+                ax[i].plot(SNRs[:,i-1], BIAS[3][i-1], marker="x", linestyle="none", label="CapsFormer")
                 ax[i].set_title(f'Bias DOA={DOAs[i-1]}')
                 ax[i].set_ylabel('Bias')
                 ax[i].set_xlabel('SNR')
@@ -342,8 +480,7 @@ class Tester:
         tikzplotlib.save(test_path + "/" + "DOA=" + str(DOAs) + "_DOA_SOI_perturb=" + str(DOAs_SOI_perturb) + "_test_BIAS_plot.tex")
         fig.savefig(test_path + "/" + "DOA=" + str(DOAs) + "_DOA_SOI_perturb=" + str(DOAs_SOI_perturb) + "_test_BIAS_plot.pdf", bbox_inches="tight")
 
-    
-    def compare_SOI(self, DOA, SNR, rng=None):
+    def compare_beampattern(self, DOA, DOA_SOI_true, DOA_SOI_perturb, SNR, rng=None):
         """ 
         """
         arr = ULA(self.M)
@@ -352,8 +489,113 @@ class Tester:
             rng = np.random.default_rng(self.random_state)
 
         X, S = arr.array_response(self.T, DOA, len(DOA), SNR, rng=rng)
-        S_capon = arr.estimate_capon(X, len(DOA), np.array(DOA))
-        S_dbf, DOA_est, DOA_dist = arr.estimate_dbf(X, len(DOA), self.model_dir)
+        if DOA_SOI_true is not None:
+            #S = S[np.where(np.isin(DOA, DOA_SOI))[0]]
+            SNR_i = SNR[np.where(np.isin(DOA, DOA_SOI_true))[0]]
+            K = len(DOA_SOI_true)
+            if DOA_SOI_perturb:
+                DOA_SOI_est = np.clip(DOA_SOI_true + rng.uniform(-2.5, 2.5, K), -90, 90)
+            else:
+                DOA_SOI_est = DOA_SOI_true
+        else:
+            DOA_SOI_est = DOA_SOI_true
+            SNR_i = SNR
+            K = len(DOA)
+        
+        w_capon = arr.estimate_capon(X, K, DOA_SOI_est)
+        w_mmse = arr.estimate_mmse(X, K, 10**(SNR_i/10), DOA_SOI_est)
+        w_dirn = arr.estimate_dirn(X, K, self.model_dir, DOA_SOI_est)
+        w_dbf, _, _ = arr.estimate_dbf(X, K, self.model_dir, DOA_SOI_est)
+        w_opt = np.zeros((X.shape[0], K)).astype('complex64')
+
+        qamma = 10**(SNR/10)
+        A = arr.steering_vector(DOA)
+
+        if DOA_SOI_true is not None:
+            for i in range(len(DOA_SOI_true)):
+                j = np.where(np.isin(DOA, DOA_SOI_true[i]))[0]
+                a = arr.steering_vector(DOA_SOI_true[i])
+                Q = np.delete(A, j, axis=1) @ np.diag(np.delete(qamma, j)) @ np.delete(A, j, axis=1).conj().T + np.eye(A.shape[0])
+                iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
+                w_opt[:,i] = (iQ @ a / (a.conj().T @ iQ @ a)).reshape(-1)
+        else:
+            for i in range(len(DOA)):
+                a = arr.steering_vector(DOA[i])
+                Q = np.delete(A, i, axis=1) @ np.diag(np.delete(qamma, i)) @ np.delete(A, i, axis=1).conj().T + np.eye(A.shape[0])
+                iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
+                w_opt[:,i] = (iQ @ a / (a.conj().T @ iQ @ a)).reshape(-1)
+
+        Gr_size = 181
+        dtheta= 180/(Gr_size-1)          
+        angle_grid = np.arange(-90,90,dtheta)
+        aa = arr.steering_vector(angle_grid)
+
+        beampattern_capon = np.abs(w_capon.conj().T @ aa)**2
+        beampattern_mmse = np.abs(w_mmse.conj().T @ aa)**2
+        beampattern_dirn = np.abs(w_dirn.conj().T @ aa)**2
+        beampattern_dbf = np.abs(w_dbf.conj().T @ aa)**2
+        beampattern_opt = np.abs(w_opt.conj().T @ aa)**2
+        beampatterns = np.stack([beampattern_capon, beampattern_mmse, beampattern_dirn, beampattern_dbf, beampattern_opt], axis=1)
+
+        test_path = os.path.abspath(self.test_dir)
+
+        if not os.path.exists(test_path):
+            os.makedirs(test_path)
+        
+        if DOA_SOI_true is not None:
+            for i in range(len(DOA_SOI_true)):
+                self.plot_beampattern(angle_grid, beampatterns[i], DOA, DOA_SOI_true[i], DOA_SOI_est[i], DOA_SOI_perturb, SNR_i[i], test_path)
+        else:
+            for i in range(len(DOA)):
+                self.plot_beampattern(angle_grid, beampatterns[i], DOA, DOA[i], None, DOA_SOI_perturb, SNR_i[i], test_path)
+        
+    def plot_beampattern(self, angle_grid, beampatterns, DOA, DOA_SOI_true, DOA_SOI_est, DOA_SOI_perturb, SNR, test_path):
+        """
+        """
+        fig = plt.figure(figsize=(6,6))
+        plt.title(f"DOA: {DOA}, DOA_SOI_true: {DOA_SOI_true}, DOA_SOI_est: {DOA_SOI_est}, SNR: {SNR}")
+        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[0])), label="Capon")
+        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[1])), label="MMSE")
+        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[2])), label="Deep INCM Reconst Net")
+        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[3])), label="CapsFormer")
+        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[4])), label="Optimal")
+        plt.vlines(np.setdiff1d(DOA, DOA_SOI_true), 10*np.log10(np.abs(beampatterns)).min(), 10*np.log10(np.abs(beampatterns)).max(), colors="b", linestyles="--", label="Interferer DOA")
+        plt.vlines(DOA_SOI_true, 10*np.log10(np.abs(beampatterns)).min(), 10*np.log10(np.abs(beampatterns)).max(), colors="r", linestyles=":", label="SOI DOA")
+        #plt.legend()
+
+        tikzplotlib.save(test_path + "/" + "DOA=" + str(DOA_SOI_true) + "_DOA_perturb=" + str(DOA_SOI_perturb) + "_test_beampattern_plot.tex")
+        fig.savefig(test_path + "/" + "DOA=" + str(DOA_SOI_true) + "_DOA_perturb=" + str(DOA_SOI_perturb) + "_test_beampattern_plot.pdf", bbox_inches="tight")
+
+
+    def compare_SOI(self, DOA, DOA_SOI_true, DOA_SOI_perturb, SNR, rng=None):
+        """
+        """
+        arr = ULA(self.M)
+
+        if rng is None:
+            rng = np.random.default_rng(self.random_state)
+
+        X, S = arr.array_response(self.T, DOA, len(DOA), SNR, rng=rng)
+        if DOA_SOI_true is not None:
+            S = S[np.where(np.isin(DOA, DOA_SOI_true))[0]]
+            SNR_i = SNR[np.where(np.isin(DOA, DOA_SOI_true))[0]]
+            DOA_i = DOA_SOI_true
+            K = len(DOA_SOI_true)
+            if DOA_SOI_perturb:
+                DOA_SOI_est = np.clip(DOA_SOI_true + rng.uniform(-2.5, 2.5, K), -90, 90)
+            else:
+                DOA_SOI_est = DOA_SOI_true
+        else:
+            DOA_SOI_est = DOA_SOI_true
+            SNR_i = SNR
+            DOA_i = DOA
+            K = len(DOA)
+        
+        w_capon = arr.estimate_capon(X, K, DOA_SOI_est)
+        w_dbf, DOA_est, DOA_dist = arr.estimate_dbf(X, K, self.model_dir, DOA_SOI_est)
+
+        S_capon = w_capon.conj().T @ X
+        S_dbf = w_dbf.conj().T @ X
 
         test_path = os.path.abspath(self.test_dir)
 
@@ -362,8 +604,8 @@ class Tester:
         
         self.plot_DOA(DOA_dist, DOA_est, DOA, SNR, test_path)
 
-        for i in range(len(DOA)):
-            self.plot_SOI(S[i], S_capon[i], S_dbf[i], DOA[i], SNR[i], test_path)
+        for i in range(len(DOA_i)):
+            self.plot_SOI(S[i], S_capon[i], S_dbf[i], DOA_i[i], SNR_i[i], test_path)
     
     def plot_DOA(self, DOA_dist, DOA_est, DOA_true, SNR, test_path):
         """
@@ -375,7 +617,7 @@ class Tester:
         #plt.legend()
         plt.title(f"Predicted DOA: {DOA_est}, True DOA: {DOA_true}, SNR: {SNR}")
         tikzplotlib.save(test_path + "/" + "DOA=" + str(DOA_true) + "_test_DOA_plot.tex")
-        fig.savefig(test_path + "/" + "DOA=" + str(DOA_est) + "_test_DOA_plot.pdf", bbox_inches="tight")
+        fig.savefig(test_path + "/" + "DOA=" + str(DOA_true) + "_test_DOA_plot.pdf", bbox_inches="tight")
 
 
     def plot_SOI(self, S_true, S_capon, S_dbf, DOA, SNR, test_path):
