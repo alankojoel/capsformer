@@ -352,6 +352,22 @@ class DeepReconstructionNet(nn.Module):
         x = self.dec(x, skip1, skip2)
         x = self.conj_symm(x)
         return x
+
+class RNNBeamformer(nn.Module):
+    """
+    RNN based beamformer
+    """
+    def __init__(self, M):
+        super().__init__()
+
+        self.gru = nn.GRU(input_size=1, hidden_size=512, num_layers=4, batch_first=True)
+        self.fc = nn.Linear(512, 2*M)
+
+    def forward(self, x):
+        x, h = self.gru(x)
+        x = self.fc(x[:, -1, :])
+        return x
+    
     
 class ULA:
     """
@@ -598,5 +614,41 @@ class ULA:
 
                 a = self.steering_vector(DOA[i])
                 w[:,i] = (INCM_est @ a / (a.conj().T @ INCM_est @ a)).reshape(-1)
+       
+        return w
+    
+    def estimate_rnnbf(self, X, K, model_dir, DOA=None):
+        """
+        """
+        try:
+            rnnbf = RNNBeamformer(self.M)
+            id = self.data_id()
+            rnnbf_path = os.path.abspath(model_dir)
+            rnnbf.load_state_dict(torch.load(rnnbf_path + "/rnnbeamformer" + id + ".pt", map_location=torch.device('cpu')))
+        except FileNotFoundError:
+            raise Exception("Trained deep INCM reconstruction net doesn't exist")
+        
+        rnnbf.eval()
+        SCM = self.compute_SCM(X)
+
+        if DOA is None:
+            Gr_size = 181
+            dtheta= 180/(Gr_size-1)          
+            angle_grid = np.arange(-90,90,dtheta)
+            DOA, _ = self.compute_MUSIC(SCM, angle_grid, K)
+        
+        DOA = (torch.tensor(DOA, dtype=torch.float32).unsqueeze(0).unsqueeze(-1) + 90) / 180
+
+        if K == 1:
+            w = rnnbf(DOA)
+            w = w.squeeze(0).detach().numpy()
+            w = (w[:self.M] + 1j * w[self.M:]).reshape(-1,1)
+        else:
+            w = np.zeros((SCM.shape[0], K)).astype('complex64')
+            for i in range(K):
+                w_i = rnnbf(torch.roll(DOA, i, 1))
+                w_i = w_i.squeeze(0).detach().numpy()
+                w_i = w_i[:self.M] + 1j * w_i[self.M:]
+                w[:,i] = w_i.reshape(-1)
        
         return w
