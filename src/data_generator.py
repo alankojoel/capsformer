@@ -35,6 +35,7 @@ class DataGenerator:
 
         SOI_train = []
         DOA_train = []
+        DOA_k_hot_train = []
         X_train = []
         SCM_train = []
 
@@ -56,6 +57,9 @@ class DataGenerator:
                     doa_diffs = np.diff(DOA_SOI_train)
                     if np.all(doa_diffs >= 10):
                         break
+                
+                DOA_k_hot = np.zeros(181)
+                DOA_k_hot[np.rint(DOA_SOI_train).astype(int) + 90] = 1.0
 
                 X, S = arr.array_response(self.T, DOA_SOI_train, self.K, SNR_train, rng)
                 #X = X / np.linalg.norm(X, axis=1, keepdims=True)
@@ -68,6 +72,7 @@ class DataGenerator:
 
                 SOI_train.append(S)
                 DOA_train.append(DOA_SOI_train)
+                DOA_k_hot_train.append(DOA_k_hot)
                 X_train.append(X)
                 SCM_train.append(SCM)
 
@@ -77,15 +82,17 @@ class DataGenerator:
         
         SOI_train = torch.tensor(np.array(SOI_train), dtype=torch.float32)
         DOA_train = torch.tensor(np.array(DOA_train), dtype=torch.float32)
+        DOA_k_hot_train = torch.tensor(np.array(DOA_k_hot_train), dtype=torch.float32)
         X_train = torch.tensor(np.array(X_train), dtype=torch.float32)
         SCM_train = torch.tensor(np.array(SCM_train), dtype=torch.float32)
 
-        self.save_data(X_train=X_train, SOI_train=SOI_train, DOA_train=DOA_train, SCM_train=SCM_train)    
+        self.save_data(SOI_train=SOI_train, DOA_train=DOA_train, DOA_k_hot_train=DOA_k_hot_train, X_train=X_train, SCM_train=SCM_train)    
         
-        del X_train, SOI_train, DOA_train, SCM_train
+        del SOI_train, DOA_train, DOA_k_hot_train, X_train, SCM_train
 
         SOI_val = []
         DOA_val = []
+        DOA_k_hot_val = []
         X_val = []
         SCM_val = []
         
@@ -103,6 +110,9 @@ class DataGenerator:
                 doa_diffs = np.diff(DOA_SOI_val)
                 if np.all(doa_diffs >= 10):
                     break
+            
+            DOA_k_hot = np.zeros(181)
+            DOA_k_hot[np.rint(DOA_SOI_val).astype(int) + 90] = 1.0
 
             X, S = arr.array_response(self.T, DOA_SOI_val, self.K, SNR_val, rng)
             #X = X / np.linalg.norm(X, axis=1, keepdims=True)
@@ -112,9 +122,10 @@ class DataGenerator:
             S = np.concatenate([S.real, S.imag], axis=1)
             X = np.stack([X.real, X.imag], axis=0)
             SCM = np.stack([SCM.real, SCM.imag, np.angle(SCM)], axis=0) #np.stack([(SCM.real - SCM.real.mean())/SCM.real.std(), (SCM.imag - SCM.imag.mean())/SCM.imag.std(), np.angle(SCM)], axis=0) # np.angle(SCM)
-
+            
             SOI_val.append(S)
             DOA_val.append(DOA_SOI_val)
+            DOA_k_hot_val.append(DOA_k_hot)
             X_val.append(X)
             SCM_val.append(SCM)
 
@@ -124,12 +135,13 @@ class DataGenerator:
 
         SOI_val = torch.tensor(np.array(SOI_val), dtype=torch.float32)
         DOA_val = torch.tensor(np.array(DOA_val), dtype=torch.float32)
+        DOA_k_hot_val = torch.tensor(np.array(DOA_k_hot_val), dtype=torch.float32)
         X_val = torch.tensor(np.array(X_val), dtype=torch.float32)
         SCM_val = torch.tensor(np.array(SCM_val), dtype=torch.float32)
 
-        self.save_data(X_val=X_val, SOI_val=SOI_val, DOA_val=DOA_val, SCM_val=SCM_val)
+        self.save_data(SOI_val=SOI_val, DOA_val=DOA_val, DOA_k_hot_val=DOA_k_hot_val, X_val=X_val, SCM_val=SCM_val)
 
-        del X_val, SOI_val, DOA_val, SCM_val
+        del SOI_val, DOA_val, DOA_k_hot_val, X_val, SCM_val
     
     def data_id(self):
         """

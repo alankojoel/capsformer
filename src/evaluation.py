@@ -16,7 +16,7 @@ import tikzplotlib
 
 class Tester:
     """
-    A class for evaluating the performance of the CapsFormer
+    A class for evaluating the performance of the CapsFormer.
 
     """
     def __init__(self, **kwargs):
@@ -48,7 +48,7 @@ class Tester:
                 SNR_i = SNR_i[np.where(np.isin(DOA, DOA_SOI_true))[0]]
             else:
                 SOI_true[i] = S
-            w_capon = arr.estimate_capon(X, K, DOA_SOI_est)
+            w_mvdr = arr.estimate_mvdr(X, K, DOA_SOI_est)
             w_mmse = arr.estimate_mmse(X, K, 10**(SNR_i/10), DOA_SOI_est)
             w_dirn = arr.estimate_dirn(X, K, self.model_dir, DOA_SOI_est)
             if DOA_SOI_true is not None:
@@ -56,30 +56,17 @@ class Tester:
             else:
                 w_rnnbf = arr.estimate_rnnbf(X, K, self.model_dir, DOA_SOI_est)
             w_dbf, _, _ = arr.estimate_dbf(X, K, self.model_dir, DOA_SOI_est)
-            W_est[0][i] = w_capon
+            W_est[0][i] = w_mvdr
             W_est[1][i] = w_mmse
             W_est[2][i] = w_dirn
             W_est[3][i] = w_rnnbf
             W_est[4][i] = w_dbf
-            SOI_est[0][i] = w_capon.conj().T @ X
+            SOI_est[0][i] = w_mvdr.conj().T @ X
             SOI_est[1][i] = w_mmse.conj().T @ X
             SOI_est[2][i] = w_dirn.conj().T @ X
             SOI_est[3][i] = w_rnnbf.conj().T @ X
             SOI_est[4][i] = w_dbf.conj().T @ X
-            """
-            qamma = 10**(SNR[i]/10)
-            j = np.where(np.isin(DOA, DOA_SOI_true))[0]
-            A = arr.steering_vector(DOA)
-            a = arr.steering_vector(DOA_SOI_true)
-            Q = np.delete(A, j, axis=1) @ np.diag(np.delete(qamma, j)) @ np.delete(A, j, axis=1).conj().T + np.eye(A.shape[0])
-            iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
-            w_opt = iQ @ a / (a.conj().T @ iQ @ a)
-            """
-            #SINR_cap.append((10*np.log10((10**(SNR_i/10) * np.abs(w_capon.conj().T @ a)**2) / np.real(w_capon.conj().T @ Q @ w_capon))).item())
-            #SINR_mmse.append((10*np.log10((10**(SNR_i/10) * np.abs(w_mmse.conj().T @ a)**2) / np.real(w_mmse.conj().T @ Q @ w_mmse))).item())
-            #SINR_dbf.append((10*np.log10((10**(SNR_i/10) * np.abs(w_dbf.conj().T @ a)**2) / np.real(w_dbf.conj().T @ Q @ w_dbf))).item())
-            #SINR_opt.append((10*np.log10((10**(SNR_i/10) * np.abs(w_opt.conj().T @ a)**2) / np.real(w_opt.conj().T @ Q @ w_opt))).item())
-
+        
         return W_est, SOI_est, SOI_true
     
     def estimate_single_sample(self, arr, DOAs, DOAs_SOI, DOAs_SOI_perturb, SNRs, rng=None):
@@ -221,10 +208,10 @@ class Tester:
             for j in range(len(SNRs)):
                 qamma_j = 10**(SNRs[j]/10)
                 if DOAs.shape[1] == 1:
-                    ESE[0][i][j] = arr.capon_ESE(DOA_i, qamma_j) / qamma_j
+                    ESE[0][i][j] = arr.mvdr_ESE(DOA_i, qamma_j) / qamma_j
                     ESE[1][i][j] = arr.mmse_ESE(DOA_i, qamma_j) / qamma_j
                 else:
-                    ESE[0][:,j] = arr.capon_ESE(DOA_i, qamma_j) / qamma_j
+                    ESE[0][:,j] = arr.mvdr_ESE(DOA_i, qamma_j) / qamma_j
                     ESE[1][:,j] = arr.mmse_ESE(DOA_i, qamma_j) / qamma_j
 
         ESE = np.array(ESE)
@@ -304,11 +291,13 @@ class Tester:
             NMSE += NMSE_i
             BIAS += BIAS_i
             curr_NMSE_mean = np.mean(NMSE / (i + 1), axis=(1,2))
+            curr_SINR_mean = np.mean(SINR / (i + 1), axis=(1,2))
             curr_BIAS_mean = np.mean(BIAS / (i + 1), axis=(1,2))
             DOA_s = ",".join(f"{DOAs[i]}" for i in range(DOAs.shape[0]))
             DOA_SOI_s = ",".join(f"{DOAs_SOI[i]}" for i in range(DOAs_SOI.shape[0])) if DOAs_SOI is not None else DOA_s
             SNR_s = ",".join(f"{SNRs[i]}" for i in range(SNRs.shape[0]))
-            desc = f'DOA: {DOA_s}, DOA_SOI: {DOA_SOI_s}, Apply perturbations: {DOAs_SOI_perturb}, MC trials: {i + 1}, Average NMSE: Capon Beamformer: {curr_NMSE_mean[0]:.4f}, MMSE Beamformer: {curr_NMSE_mean[1]:.4f}, Deep INCM Reconst Net: {curr_NMSE_mean[2]:.4f}, GRU Beamformer: {curr_NMSE_mean[3]:.4f}, CapsFormer: {curr_NMSE_mean[4]:.4f} Average BIAS: Capon Beamformer: {curr_BIAS_mean[0]:.4f}, MMSE Beamformer: {curr_BIAS_mean[1]:.4f}, Deep INCM Reconst Net: {curr_BIAS_mean[2]:.4f}, GRU Beamformer: {curr_BIAS_mean[3]:.4f}, CapsFormer: {curr_BIAS_mean[4]:.4f}' #SNR: {SNR_string}, 
+            desc = (f"DOA: {DOA_s}, DOA_SOI: {DOA_SOI_s}, Apply perturbations: {DOAs_SOI_perturb}, MC trials: {i + 1}, Average NMSE: MVDR Beamformer: {curr_NMSE_mean[0]:.4f}, MMSE Beamformer: {curr_NMSE_mean[1]:.4f}, Deep INCM Reconst Net: {curr_NMSE_mean[2]:.4f}, GRU Beamformer: {curr_NMSE_mean[3]:.4f}, CapsFormer: {curr_NMSE_mean[4]:.4f}" 
+                    f"Average SINR: MVDR Beamformer: {curr_SINR_mean[0]:.4f}, MMSE Beamformer: {curr_SINR_mean[1]:.4f}, Deep INCM Reconst Net: {curr_SINR_mean[2]:.4f}, GRU Beamformer: {curr_SINR_mean[3]:.4f}, CapsFormer: {curr_SINR_mean[4]:.4f}, Optimal: {curr_SINR_mean[5]:.4f}")
             pbar.set_description(desc)  
             pbar.update()
 
@@ -355,14 +344,14 @@ class Tester:
             
         log_stats(log_path, f"Monte Carlo trials: {MC_trials}")
         
-        log_stats(log_path, f"(SINR DOAs) Capon Beamformer: {', '.join(f'{x:.4f}' for x in SINR_DOA[0])}")
+        log_stats(log_path, f"(SINR DOAs) MVDR Beamformer: {', '.join(f'{x:.4f}' for x in SINR_DOA[0])}")
         log_stats(log_path, f"(SINR DOAs) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in SINR_DOA[1])}")
         log_stats(log_path, f"(SINR DOAs) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in SINR_DOA[2])}")
         log_stats(log_path, f"(SINR DOAs) GRU Beamformer: {', '.join(f'{x:.4f}' for x in SINR_DOA[3])}")
         log_stats(log_path, f"(SINR DOAs) CapsFormer: {', '.join(f'{x:.4f}' for x in SINR_DOA[4])}")
         log_stats(log_path, f"(SINR DOAs) Optimal: {', '.join(f'{x:.4f}' for x in SINR_DOA[5])}")
 
-        log_stats(log_path, f"(NMSE DOAs) Capon Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[0])}")
+        log_stats(log_path, f"(NMSE DOAs) MVDR Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[0])}")
         log_stats(log_path, f"(NMSE DOAs) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[1])}")
         log_stats(log_path, f"(NMSE DOAs) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in NMSE_DOA[2])}")
         log_stats(log_path, f"(NMSE DOAs) GRU Beamformer: {', '.join(f'{x:.4f}' for x in NMSE_DOA[3])}")
@@ -370,7 +359,7 @@ class Tester:
         log_stats(log_path, f"(NMSE DOAs) Optimal: {', '.join(f'{x:.4f}' for x in ESE_DOA[1])}")
 
         for i in range(DOAs_act.shape[0]):
-            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) Capon Beamformer: {', '.join(f'{x:.4f}' for x in SINR[0][i])}")
+            log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) MVDR Beamformer: {', '.join(f'{x:.4f}' for x in SINR[0][i])}")
             log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in SINR[1][i])}")
             log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in SINR[2][i])}")
             log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) GRU Beamformer: {', '.join(f'{x:.4f}' for x in SINR[3][i])}")
@@ -378,21 +367,21 @@ class Tester:
             log_stats(log_path, f"(SINR SNRs DOA={DOAs_act[i]}) Optimal: {', '.join(f'{x:.4f}' for x in SINR[5][i])}")
 
         for i in range(DOAs_act.shape[0]):
-            log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Capon Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[0][i])}")
+            log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) MVDR Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[0][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[1][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in NMSE[2][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) GRU Beamformer: {', '.join(f'{x:.4f}' for x in NMSE[3][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) CapsFormer: {', '.join(f'{x:.4f}' for x in NMSE[4][i])}")
             log_stats(log_path, f"(NMSE SNRs DOA={DOAs_act[i]}) Optimal: {', '.join(f'{x:.4f}' for x in ESE[1][i])}")
 
-        log_stats(log_path, f"(BIAS DOAs) Capon Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[0])}")
+        log_stats(log_path, f"(BIAS DOAs) MVDR Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[0])}")
         log_stats(log_path, f"(BIAS DOAs) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[1])}")
         log_stats(log_path, f"(BIAS DOAs) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in BIAS_DOA[2])}")
         log_stats(log_path, f"(BIAS DOAs) GRU Beamformer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[3])}")
         log_stats(log_path, f"(BIAS DOAs) CapsFormer: {', '.join(f'{x:.4f}' for x in BIAS_DOA[4])}")
 
         for i in range(DOAs_act.shape[0]):
-            log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) Capon Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[0][i])}")
+            log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) MVDR Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[0][i])}")
             log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) MMSE Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[1][i])}")
             log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) Deep INCM Reconst Net: {', '.join(f'{x:.4f}' for x in BIAS[2][i])}")
             log_stats(log_path, f"(BIAS SNRs DOA={DOAs_act[i]}) GRU Beamformer: {', '.join(f'{x:.4f}' for x in BIAS[3][i])}")
@@ -411,7 +400,7 @@ class Tester:
 
         for i in range(len(DOAs) + 1):
             if i == 0:
-                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[0]), marker="D", linestyle="none", mfc="none", label="Capon Beamformer")
+                ax[i].plot(DOAs, 10*np.log10(SINR_DOA[0]), marker="D", linestyle="none", mfc="none", label="MVDR Beamformer")
                 ax[i].plot(DOAs, 10*np.log10(SINR_DOA[1]), marker="o", linestyle="none", mfc="none", label="MMSE Beamformer")
                 ax[i].plot(DOAs, 10*np.log10(SINR_DOA[2]), marker="s", linestyle="none", mfc="none", label="Deep INCM Reconst Net")
                 ax[i].plot(DOAs, 10*np.log10(SINR_DOA[3]), marker=(5,2), linestyle="none", mfc="none", label="GRU Beamformer")
@@ -423,7 +412,7 @@ class Tester:
                 #ax[i].legend()
                 ax[i].grid(True, which='both', linestyle='--', linewidth=0.5)
             else:
-                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[0][i-1]), marker="D", linestyle="none", mfc="none", label="Capon Beamformer")
+                ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[0][i-1]), marker="D", linestyle="none", mfc="none", label="MVDR Beamformer")
                 ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[1][i-1]), marker="o", linestyle="none", mfc="none", label="MMSE Beamformer")
                 ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[2][i-1]), marker="s", linestyle="none", mfc="none", label="Deep INCM Reconst Net")
                 ax[i].plot(SNRs[:,i-1], 10*np.log10(SINR[3][i-1]), marker=(5,2), linestyle="none", mfc="none", label="GRU Beamformer")
@@ -445,7 +434,7 @@ class Tester:
 
         for i in range(len(DOAs) + 1):
             if i == 0:
-                ax[i].plot(DOAs, NMSE_DOA[0], marker="D", linestyle="none", mfc="none", label="Capon Beamformer")
+                ax[i].plot(DOAs, NMSE_DOA[0], marker="D", linestyle="none", mfc="none", label="MVDR Beamformer")
                 ax[i].plot(DOAs, NMSE_DOA[1], marker="o", linestyle="none", mfc="none", label="MMSE Beamformer")
                 ax[i].plot(DOAs, NMSE_DOA[2], marker="s", linestyle="none", mfc="none", label="Deep INCM Reconst Net")
                 ax[i].plot(DOAs, NMSE_DOA[3], marker=(5,2), linestyle="none", mfc="none", label="GRU Beamformer")
@@ -457,7 +446,7 @@ class Tester:
                 #ax[i].legend()
                 ax[i].grid(True, which='both', linestyle='--', linewidth=0.5)
             else:
-                ax[i].plot(SNRs[:,i-1], NMSE[0][i-1], marker="D", linestyle="none", mfc="none", label="Capon Beamformer")
+                ax[i].plot(SNRs[:,i-1], NMSE[0][i-1], marker="D", linestyle="none", mfc="none", label="MVDR Beamformer")
                 ax[i].plot(SNRs[:,i-1], NMSE[1][i-1], marker="o", linestyle="none", mfc="none", label="MMSE Beamformer")
                 ax[i].plot(SNRs[:,i-1], NMSE[2][i-1], marker="s", linestyle="none", mfc="none", label="Deep INCM Reconst Net")
                 ax[i].plot(SNRs[:,i-1], NMSE[3][i-1], marker=(5,2), linestyle="none", mfc="none", label="GRU Beamformer")
@@ -479,7 +468,7 @@ class Tester:
 
         for i in range(len(DOAs) + 1):
             if i == 0:
-                ax[i].plot(DOAs, BIAS_DOA[0], marker="D", linestyle="none", mfc="none", label="Capon Beamformer")
+                ax[i].plot(DOAs, BIAS_DOA[0], marker="D", linestyle="none", mfc="none", label="MVDR Beamformer")
                 ax[i].plot(DOAs, BIAS_DOA[1], marker="o", linestyle="none", mfc="none", label="MMSE Beamformer")
                 ax[i].plot(DOAs, BIAS_DOA[2], marker="s", linestyle="none", mfc="none", label="Deep INCM Reconst Net")
                 ax[i].plot(DOAs, BIAS_DOA[3], marker=(5,2), linestyle="none", mfc="none", label="GRU Beamformer")
@@ -490,7 +479,7 @@ class Tester:
                 #ax[i].legend()
                 ax[i].grid(True, which='both', linestyle='--', linewidth=0.5)
             else:
-                ax[i].plot(SNRs[:,i-1], BIAS[0][i-1], marker="D", linestyle="none", mfc="none", label="Capon Beamformer")
+                ax[i].plot(SNRs[:,i-1], BIAS[0][i-1], marker="D", linestyle="none", mfc="none", label="MVDR Beamformer")
                 ax[i].plot(SNRs[:,i-1], BIAS[1][i-1], marker="o", linestyle="none", mfc="none", label="MMSE Beamformer")
                 ax[i].plot(SNRs[:,i-1], BIAS[2][i-1], marker="s", linestyle="none", mfc="none", label="Deep INCM Reconst Net")
                 ax[i].plot(SNRs[:,i-1], BIAS[3][i-1], marker=(5,2), linestyle="none", mfc="none", label="GRU Beamformer")
@@ -526,7 +515,7 @@ class Tester:
             SNR_i = SNR
             K = len(DOA)
         
-        w_capon = arr.estimate_capon(X, K, DOA_SOI_est)
+        w_mvdr = arr.estimate_mvdr(X, K, DOA_SOI_est)
         w_mmse = arr.estimate_mmse(X, K, 10**(SNR_i/10), DOA_SOI_est)
         w_dirn = arr.estimate_dirn(X, K, self.model_dir, DOA_SOI_est)
         if DOA_SOI_true is not None:
@@ -558,13 +547,13 @@ class Tester:
         angle_grid = np.arange(-90,90,dtheta)
         aa = arr.steering_vector(angle_grid)
 
-        beampattern_capon = np.abs(w_capon.conj().T @ aa)**2
+        beampattern_mvdr = np.abs(w_mvdr.conj().T @ aa)**2
         beampattern_mmse = np.abs(w_mmse.conj().T @ aa)**2
         beampattern_dirn = np.abs(w_dirn.conj().T @ aa)**2
         beampattern_rnnbf = np.abs(w_rnnbf.conj().T @ aa)**2
         beampattern_dbf = np.abs(w_dbf.conj().T @ aa)**2
         beampattern_opt = np.abs(w_opt.conj().T @ aa)**2
-        beampatterns = np.stack([beampattern_capon, beampattern_mmse, beampattern_dirn, beampattern_rnnbf, beampattern_dbf, beampattern_opt], axis=1)
+        beampatterns = np.stack([beampattern_mvdr, beampattern_mmse, beampattern_dirn, beampattern_rnnbf, beampattern_dbf, beampattern_opt], axis=1)
 
         test_path = os.path.abspath(self.test_dir)
 
@@ -583,7 +572,7 @@ class Tester:
         """
         fig = plt.figure(figsize=(6,6))
         plt.title(f"DOA: {DOA}, DOA_SOI_true: {DOA_SOI_true}, DOA_SOI_est: {DOA_SOI_est}, SNR: {SNR}")
-        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[0])), label="Capon")
+        plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[0])), label="MVDR")
         plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[1])), label="MMSE")
         plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[2])), label="Deep INCM Reconst Net")
         plt.plot(angle_grid, 10*np.log10(np.abs(beampatterns[3])), label="GRU Beamformer")
@@ -595,90 +584,4 @@ class Tester:
 
         tikzplotlib.save(test_path + "/" + "DOA=" + str(DOA_SOI_true) + "_DOA_perturb=" + str(DOA_SOI_perturb) + "_test_beampattern_plot.tex")
         fig.savefig(test_path + "/" + "DOA=" + str(DOA_SOI_true) + "_DOA_perturb=" + str(DOA_SOI_perturb) + "_test_beampattern_plot.pdf", bbox_inches="tight")
-
-
-    def compare_SOI(self, DOA, DOA_SOI_true, DOA_SOI_perturb, SNR, rng=None):
-        """
-        """
-        arr = ULA(self.M)
-
-        if rng is None:
-            rng = np.random.default_rng(self.random_state)
-
-        X, S = arr.array_response(self.T, DOA, len(DOA), SNR, rng=rng)
-        if DOA_SOI_true is not None:
-            S = S[np.where(np.isin(DOA, DOA_SOI_true))[0]]
-            SNR_i = SNR[np.where(np.isin(DOA, DOA_SOI_true))[0]]
-            DOA_i = DOA_SOI_true
-            K = len(DOA_SOI_true)
-            if DOA_SOI_perturb:
-                DOA_SOI_est = np.clip(DOA_SOI_true + rng.uniform(-2.5, 2.5, K), -90, 90)
-            else:
-                DOA_SOI_est = DOA_SOI_true
-        else:
-            DOA_SOI_est = DOA_SOI_true
-            SNR_i = SNR
-            DOA_i = DOA
-            K = len(DOA)
-        
-        w_capon = arr.estimate_capon(X, K, DOA_SOI_est)
-        w_dbf, DOA_est, DOA_dist = arr.estimate_dbf(X, K, self.model_dir, DOA_SOI_est)
-
-        S_capon = w_capon.conj().T @ X
-        S_dbf = w_dbf.conj().T @ X
-
-        test_path = os.path.abspath(self.test_dir)
-
-        if not os.path.exists(test_path):
-            os.makedirs(test_path)
-        
-        self.plot_DOA(DOA_dist, DOA_est, DOA, SNR, test_path)
-
-        for i in range(len(DOA_i)):
-            self.plot_SOI(S[i], S_capon[i], S_dbf[i], DOA_i[i], SNR_i[i], test_path)
-    
-    def plot_DOA(self, DOA_dist, DOA_est, DOA_true, SNR, test_path):
-        """
-        """
-        fig = plt.figure(figsize=(6,6))
-        plt.plot(np.arange(-90, 90+1), DOA_dist)
-        plt.vlines(DOA_est, 0, DOA_dist[DOA_est + 90], colors="b", linestyles="--", label="Predicted DOA")
-        plt.vlines(np.round(DOA_true).astype('int'), 0, DOA_dist[np.round(DOA_true).astype('int') + 90], colors="r", linestyles=":", label="True DOA")
-        #plt.legend()
-        plt.title(f"Predicted DOA: {DOA_est}, True DOA: {DOA_true}, SNR: {SNR}")
-        tikzplotlib.save(test_path + "/" + "DOA=" + str(DOA_true) + "_test_DOA_plot.tex")
-        fig.savefig(test_path + "/" + "DOA=" + str(DOA_true) + "_test_DOA_plot.pdf", bbox_inches="tight")
-
-
-    def plot_SOI(self, S_true, S_capon, S_dbf, DOA, SNR, test_path):
-        """
-        """
-        fig, ax = plt.subplots(2, 2, figsize=(12, 12))
-        fig.suptitle(f"True and predicted SOI with DOA={DOA} and SNR={SNR}")
-    
-        ax[0,0].plot(S_true.real.T, label="True")
-        ax[0,1].plot(S_true.imag.T, label="True")
-
-        ax[0,0].plot(S_capon.real.T, label="Capon estimate")
-        ax[0,1].plot(S_capon.imag.T, label="Capon estimate")
-
-        ax[1,0].plot(S_true.real.T, label="True")
-        ax[1,1].plot(S_true.imag.T, label="True")
-
-        ax[1,0].plot(S_dbf.real.T, label="DBF estimate")
-        ax[1,1].plot(S_dbf.imag.T, label="DBF estimate")
-        
-        for i in range(2):
-            for j in range(2):
-                if j == 0:
-                    ax[i,j].set_title('Re Part')
-                else:
-                    ax[i,j].set_title('Im Part')
-                ax[i,j].set_ylabel('Value')
-                ax[i,j].set_xlabel('Sample')
-                #ax[i,j].legend()
-                ax[i,j].grid(True, which='both', linestyle='--', linewidth=0.5)
-        
-        tikzplotlib.save(test_path + "/" + "DOA=" + str(DOA) + "_test_SOI_plot.tex")
-        fig.savefig(test_path + "/" + "DOA=" + str(DOA) + "_test_SOI_plot.pdf", bbox_inches="tight")
 

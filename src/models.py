@@ -11,12 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 import matplotlib.pyplot as plt
-import tikzplotlib
-from src.utils import plot_couplings
+#import tikzplotlib
 
 class Capsule(nn.Module):
     """
-    A class implementing capsule layers
+    A class implementing capsule layers.
 
     """
     def __init__(self, in_caps_num, in_caps_dim, out_caps_num, out_caps_dim, num_routing=3):
@@ -36,7 +35,15 @@ class Capsule(nn.Module):
         out = (1 - 1/torch.exp(L2_norm)) * (x / (L2_norm + 1e-8))
 
         return out
-    
+
+    def uniform_routing(self, u_hat):
+        b = Variable(torch.zeros(u_hat.shape[0], self.out_caps_num, self.in_caps_num)).to(u_hat.device)
+        c = F.softmax(b, dim=1)
+        v = self.squash(torch.sum(c[:, :, :, None] * u_hat, dim=-2, keepdim=True))
+
+        return v, c
+
+    @torch.compile()   
     def routing(self, u_hat):
         """
         """
@@ -96,13 +103,13 @@ class PrimaryCapsule(nn.Module):
 
         return self.squash(u)
 
-class DeepBeamformer(nn.Module):
+class CapsFormer(nn.Module):
     """
-    A class implementing CapsFormer
+    A class implementing CapsFormer.
 
     """
     def __init__(self, num_antennas): 
-        super(DeepBeamformer, self).__init__()
+        super(CapsFormer, self).__init__()
         self.num_antennas = num_antennas
         
         self.conv_layers = nn.Sequential(
@@ -182,7 +189,6 @@ class DeepBeamformer(nn.Module):
         x = self.conv_layers(scm) 
         x = self.prim_caps(x)
         x, r1 = self.capsule_1(x)
-        #plot_couplings(r1.squeeze(0))
         length = x.norm(dim=-1)
         length = length / (length.sum(dim=-1, keepdim=True) + 1e-8)
 
@@ -194,13 +200,7 @@ class DeepBeamformer(nn.Module):
         W = torch.zeros(x.shape[0], 2 * self.num_antennas, K).to(x.device)
 
         for i in range(K):
-            y = Variable(torch.zeros(length.size()).scatter_(1, index[:,i].view(-1, 1).cpu(), 1.).to(x.device))
-            #print((x[:, index[:,i]]))
-            #fig, ax = plt.subplots(figsize=(10, 6))
-            #plt.stem((x[:, index[:,i]]).squeeze(0,1).detach().numpy())
-            #plt.show()
-            #tikzplotlib.save("caps_elements.tex")
-            #fig.savefig("caps_elements.pdf", bbox_inches="tight")
+            y = torch.zeros(length.size(), device=x.device).scatter_(1, index[:,i].view(-1, 1), 1.) 
             c = self.fc_layers((x * y[:, :, None]).view(x.size(0), -1))
             W[:, :, i] = self.pred_head(c).squeeze(-1)
 
@@ -208,7 +208,7 @@ class DeepBeamformer(nn.Module):
 
 class Encoder(nn.Module):
     """
-    Encoder part of the INCM reconstruction network
+    Encoder part of the INCM reconstruction network.
     """
     def __init__(self):
         super().__init__()
@@ -257,7 +257,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     """
-    Decoder part of the INCM reconstruction network
+    Decoder part of the INCM reconstruction network.
     """
     def __init__(self):
         super().__init__()
@@ -319,7 +319,7 @@ class Decoder(nn.Module):
 
 class ConjugateSymmetrization(nn.Module):
     """
-    Conjugate symmetrization layer of the INCM reconstruction network
+    Conjugate symmetrization layer of the INCM reconstruction network.
     """
     def forward(self, Q):
         # Q: (B, 2, M, M)
@@ -338,7 +338,7 @@ class ConjugateSymmetrization(nn.Module):
 
 class DeepReconstructionNet(nn.Module):
     """
-    Deep INCM reconstruction network
+    Deep INCM reconstruction network.
     """
     def __init__(self):
         super().__init__()
@@ -355,7 +355,7 @@ class DeepReconstructionNet(nn.Module):
 
 class RNNBeamformer(nn.Module):
     """
-    RNN based beamformer
+    RNN based beamformer.
     """
     def __init__(self, M):
         super().__init__()
@@ -416,7 +416,7 @@ class ULA:
         """
         return "_M=" + str(self.M)
     
-    def estimate_capon(self, X, K, DOA=None):
+    def estimate_mvdr(self, X, K, DOA=None):
         """
         """
         SCM = self.compute_SCM(X)
@@ -460,6 +460,31 @@ class ULA:
         
         return (qamma * np.eye(a.shape[1]) @ w.T).T #qamma * np.eye(a.shape[1]) @ w.conj().T @ X
     
+    def mvdr_optimal_weights(self, qamma, DOA):
+        """
+        """
+        w = np.zeros((self.M, len(DOA))).astype('complex64')
+        A = self.steering_vector(DOA)
+
+        for i in range(len(DOA)):
+            a = self.steering_vector(DOA[i])
+            Q = np.delete(A, i, axis=1) @ np.diag(np.delete(qamma, i)) @ np.delete(A, i, axis=1).conj().T + np.eye(A.shape[0])
+            iQ = np.linalg.solve(Q, np.eye(A.shape[0]))
+            w[:,i] = (iQ @ a / (a.conj().T @ iQ @ a)).reshape(-1)
+
+        return w
+
+    def mmse_optimal_weights(self, qamma, DOA):
+        """
+        """
+        a = self.steering_vector(DOA)
+        arr_cov = a @ np.diag(qamma) @ a.conj().T + np.eye(a.shape[0])
+        arr_cov_inv = solve(arr_cov, np.eye(arr_cov.shape[0])) #, assume_a='hermitian')
+
+        w = arr_cov_inv @ a
+
+        return (qamma * np.eye(a.shape[1]) @ w.T).T
+    
     def compute_SCB(self, SCM, angle_grid, K):
         """
         """
@@ -495,7 +520,7 @@ class ULA:
         return np.sort(DOAs), spatial_spectrum
 
 
-    def capon_ESE(self, DOA, qamma):
+    def mvdr_ESE(self, DOA, qamma):
         """
         """
         A = self.steering_vector(DOA)
@@ -519,7 +544,7 @@ class ULA:
     def mmse_ESE(self, DOA, qamma):
         """
         """
-        qamma_cap = qamma + self.capon_ESE(DOA, qamma)
+        qamma_cap = qamma + self.mvdr_ESE(DOA, qamma)
         se = (qamma / qamma_cap) * (qamma_cap - qamma)
 
         return se
@@ -528,12 +553,13 @@ class ULA:
         """
         """
         try:
-            dbf = DeepBeamformer(self.M) #T
+            dbf = CapsFormer(self.M) #T
+            #dbf = torch.compile(dbf)
             id = self.data_id()
             dbf_path = os.path.abspath(model_dir)
-            dbf.load_state_dict(torch.load(dbf_path + "/deepbeamformer" + id + ".pt", map_location=torch.device('cpu')))
+            dbf.load_state_dict(torch.load(dbf_path + "/capsformer" + id + ".pt", map_location=torch.device('cpu')))
         except FileNotFoundError:
-            raise Exception("Trained deep beamformer doesn't exist")
+            raise Exception("Trained CapsFormer doesn't exist")
         
         dbf.eval()
         SCM = self.compute_SCM(X)
@@ -560,12 +586,12 @@ class ULA:
         """
         """
         try:
-            dbf = DeepBeamformer(self.M) 
+            dbf = CapsFormer(self.M) 
             id = self.data_id()
             dbf_path = os.path.abspath(model_dir)
-            dbf.load_state_dict(torch.load(dbf_path + "/deepbeamformer" + id + ".pt", map_location=torch.device('cpu'))) #, map_location=torch.device('cpu')
+            dbf.load_state_dict(torch.load(dbf_path + "/capsformer" + id + ".pt", map_location=torch.device('cpu'))) #, map_location=torch.device('cpu')
         except FileNotFoundError:
-            raise Exception("Trained deep beamformer doesn't exist")
+            raise Exception("Trained CapsFormer doesn't exist")
         
         dbf.eval()
         out = dbf.capsule_output(SCM, K, DOA)
@@ -626,7 +652,7 @@ class ULA:
             rnnbf_path = os.path.abspath(model_dir)
             rnnbf.load_state_dict(torch.load(rnnbf_path + "/rnnbeamformer" + id + ".pt", map_location=torch.device('cpu')))
         except FileNotFoundError:
-            raise Exception("Trained deep INCM reconstruction net doesn't exist")
+            raise Exception("Trained RNN beamformer doesn't exist")
         
         rnnbf.eval()
         SCM = self.compute_SCM(X)

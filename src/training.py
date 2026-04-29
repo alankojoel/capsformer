@@ -7,38 +7,37 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.distributions import Laplace
-from torch.autograd import Variable
 import gc
 from src.utils import log_stats
-from src.models import DeepBeamformer
+from src.models import CapsFormer
 
 class ArrayDataset(Dataset):
     """
     Custom dataset class for handling training and validation data.
 
     """
-    def __init__(self, Xs, SCMs, SOIs, DOAs):
-        self.Xs = Xs
+    def __init__(self, SCMs, Xs, SOIs, DOAs, DOAs_k_hot):
         self.SCMs = SCMs
+        self.Xs = Xs
         self.SOIs = SOIs
         self.DOAs = DOAs
+        self.DOAs_k_hot = DOAs_k_hot
 
     def __len__(self):
         """
         """
-        return len(self.Xs)
+        return len(self.SCMs)
 
     def __getitem__(self, idx):
         """
         """
-        X_i = self.Xs[idx]
         SCM_i = self.SCMs[idx]
+        X_i = self.Xs[idx]
         SOI_i = self.SOIs[idx]
         DOA_i = self.DOAs[idx]
-        DOA_i_r = torch.round(DOA_i).to(torch.int64) + 90
-        DOA_i_k = torch.zeros((DOA_i_r.shape[0], 181)).scatter_(1, DOA_i_r.view(-1, 1), 1.).sum(dim=0) #torch.nn.functional.one_hot(DOA_i, num_classes=181).to(torch.float32)
+        DOA_i_k = self.DOAs_k_hot[idx]
         
-        return X_i, SCM_i, SOI_i, DOA_i, DOA_i_k
+        return SCM_i, X_i, SOI_i, DOA_i, DOA_i_k
         
 
 class NMSELoss(nn.Module):
@@ -87,6 +86,8 @@ class Trainer:
         self.num_epochs = kwargs["num_epochs"]
         self.batch_size = kwargs["batch_size"]
         self.scale = kwargs["scale"]
+        self.lambda_1 = kwargs["lambda_1"]
+        self.lambda_2 = kwargs["lambda_2"]
         self.wd = kwargs["wd"]
         self.lr = kwargs["lr"]
         self.lr_gamma = kwargs["lr_gamma"]
@@ -114,13 +115,8 @@ class Trainer:
             del self.model
             gc.collect()
 
-        self.model = DeepBeamformer(self.M).to(self.device)
-
-        """
-        for layer in self.model.modules():
-            if isinstance(layer, (nn.Linear)):
-                nn.init.normal_(layer.weight, mean=0, std=0.25)
-        """
+        self.model = CapsFormer(self.M).to(self.device)
+        self.model = torch.compile(self.model)
 
     def data_id(self):
         """
@@ -134,28 +130,32 @@ class Trainer:
         data_path = os.path.abspath(self.data_dir)
         
         try:
-            X_train = torch.load(data_path + "/X_train" + id + ".pt")
+            SCM_train = torch.load(data_path + "/SCM_train" + id + ".pt")
         except FileNotFoundError:
             raise Exception("Load data: training feature set doesn't exist")
         try:
-            SCM_train = torch.load(data_path + "/SCM_train" + id + ".pt")
+            X_train = torch.load(data_path + "/X_train" + id + ".pt")
         except FileNotFoundError:
             raise Exception("Load data: training feature set doesn't exist")
         try:
             SOI_train = torch.load(data_path + "/SOI_train" + id + ".pt")
         except FileNotFoundError:
-            raise Exception("Load data: training label set doesn't exist")
+            raise Exception("Load data: training label set doesn't exist") 
         try:
             DOA_train = torch.load(data_path + "/DOA_train" + id + ".pt")
         except FileNotFoundError:
-            raise Exception("Load data: training label set doesn't exist")
-        
+            raise Exception("Load data: training label set doesn't exist") 
         try:
-            X_val = torch.load(data_path + "/X_val" + id + ".pt")
+            DOA_k_hot_train = torch.load(data_path + "/DOA_k_hot_train" + id + ".pt")
+        except FileNotFoundError:
+            raise Exception("Load data: training label set doesn't exist")
+
+        try:
+            SCM_val = torch.load(data_path + "/SCM_val" + id + ".pt")
         except FileNotFoundError:
             raise Exception("Load data: validation feature set doesn't exist")
         try:
-            SCM_val = torch.load(data_path + "/SCM_val" + id + ".pt")
+            X_val = torch.load(data_path + "/X_val" + id + ".pt")
         except FileNotFoundError:
             raise Exception("Load data: validation feature set doesn't exist")
         try:
@@ -166,9 +166,13 @@ class Trainer:
             DOA_val = torch.load(data_path + "/DOA_val" + id + ".pt")
         except FileNotFoundError:
             raise Exception("Load data: validation label set doesn't exist")
+        try:
+            DOA_k_hot_val = torch.load(data_path + "/DOA_k_hot_val" + id + ".pt")
+        except FileNotFoundError:
+            raise Exception("Load data: validation label set doesn't exist")
 
-        train_set = ArrayDataset(X_train, SCM_train, SOI_train, DOA_train)
-        val_set = ArrayDataset(X_val, SCM_val, SOI_val, DOA_val)
+        train_set = ArrayDataset(SCM_train, X_train, SOI_train, DOA_train, DOA_k_hot_train)
+        val_set = ArrayDataset(SCM_val, X_val, SOI_val, DOA_val, DOA_k_hot_val)
 
 
         return train_set, val_set
@@ -213,12 +217,19 @@ class Trainer:
         train_ds, val_ds = self.load_data()
 
         self.train_loader = DataLoader(train_ds,
+                                       num_workers=2,
+                                       pin_memory=True,
+                                       persistent_workers=True,
+                                       prefetch_factor=8,
                                        batch_size=self.batch_size,
+                                       drop_last=True,
                                        shuffle=True)
         
         self.val_loader = DataLoader(val_ds,
+                                     num_workers=1,
+                                     prefetch_factor=8,
                                      batch_size=self.batch_size,
-                                     shuffle=True)
+                                     shuffle=False)
 
         self.optimizer = torch.optim.Adam(self.model.parameters(),
                                           lr=self.lr,
@@ -238,21 +249,24 @@ class Trainer:
         
         for self.epoch in range(n_epochs):
 
+            self.init_laplace()
+
             self.model.train()
             train_loss, train_m_loss, train_r_loss, train_p_loss, train_acc, train_rmse = self.train_epoch()
             log_stats(self.log_path, f"[{self.epoch+1}] Train - Regression loss: {train_m_loss}, Reconstruction loss: {train_r_loss}, Power loss: {train_p_loss}, DOA accuracy: {train_acc}, DOA RMSE: {train_rmse}")
 
-            self.model.eval()
-            val_loss, val_m_loss, val_r_loss, val_p_loss, val_acc, val_rmse = self.val_epoch()
-            log_stats(self.log_path, f"[{self.epoch+1}] Validation - Regression loss: {val_m_loss}, Reconstruction loss: {val_r_loss}, Power loss: {val_p_loss}, DOA accuracy: {val_acc}, DOA RMSE: {val_rmse}")
+            if self.epoch % 5 == 0:
+                self.model.eval()
+                val_loss, val_m_loss, val_r_loss, val_p_loss, val_acc, val_rmse = self.val_epoch()
+                log_stats(self.log_path, f"[{self.epoch+1}] Validation - Regression loss: {val_m_loss}, Reconstruction loss: {val_r_loss}, Power loss: {val_p_loss}, DOA accuracy: {val_acc}, DOA RMSE: {val_rmse}")
 
-            if self.epoch + 1 <= 26: # 22 40
+            if self.epoch + 1 <= 26:
                 self.scale *= 0.95
 
         id = self.data_id()
-        torch.save(self.model.state_dict(), self.model_path + "/deepbeamformer" + id + ".pt")
+        torch.save(self.model.state_dict(), self.model_path + "/capsformer" + id + ".pt")
     
-    def loss_beamformer(self, X, SCM, SOI, DOA, DOA_k_hot, mode="train"):
+    def loss_beamformer(self, SCM, X, SOI, DOA, DOA_k_hot, mode="train"):
         """
         """
         if mode == "train":
@@ -262,32 +276,28 @@ class Trainer:
             W_est, DOA_est = self.model(SCM, self.K, DOA)
         else:
             raise Exception("Invalid loss mode.")
-
+        
         W_est = W_est[:,:self.M,:] + 1j * W_est[:,self.M:,:]
         X = X[:,0,:,:] + 1j * X[:,1,:,:]
         SOI_est = torch.matmul(W_est.transpose(1,2).conj(), X)
         SOI_est = torch.cat((SOI_est.real, SOI_est.imag), dim=2)
 
-        DOA_smooth = self.smooth_k_hot(DOA_k_hot, self.scale).to(DOA_k_hot.device)
-            
-        if (self.epoch == 0 or (self.epoch + 1) % 5 == 0) and self.i == 0 and mode == "train":
-            self.plot_DOA(DOA_smooth[:4].cpu().detach().numpy(), DOA_est[:4].cpu().detach().numpy())
-            
+        DOA_smooth = self.smooth_k_hot(DOA_k_hot) #.to(DOA_k_hot.device)
+              
         loss_m = self.loss_regres(DOA_est, DOA_smooth)
         loss_r = self.loss_reconst(SOI_est, SOI)
         loss_p = self.loss_power(SOI_est, SOI)
         clf_acc = self.classification_accuracy(DOA_est, DOA_k_hot)
         clf_rmse = self.classification_RMSE(DOA_est, DOA)
 
-        loss = loss_m + 1 * loss_r + 0.001 * loss_p
+        loss = loss_m + self.lambda_1 * loss_r + self.lambda_2 * loss_p
 
         return loss, loss_m, loss_r, loss_p, clf_acc, clf_rmse
 
     def DOA_perturb(self, DOA):
         """
         """
-        dist = Laplace(0, self.scale)
-        pert = dist.sample(DOA.shape).to(DOA.device)
+        pert = self.laplace_dist.sample(DOA.shape)
         DOA_pert = torch.clamp(DOA + pert, -90, 90)
 
         return DOA_pert
@@ -295,14 +305,13 @@ class Trainer:
     def loss_regres(self, DOA_est, DOA):
         """
         """
-        return nn.KLDivLoss(reduction='batchmean')(DOA_est.log(), DOA)
-        
+        return nn.KLDivLoss(reduction='batchmean')(DOA_est.log(), DOA) 
         
     def loss_reconst(self, SOI_est, SOI):
         """
         """
-        return NMSELoss()(SOI_est, SOI) 
-
+        return NMSELoss()(SOI_est, SOI)
+    
     def loss_power(self, SOI_est, SOI):
         """
         """
@@ -325,89 +334,71 @@ class Trainer:
         DOA_est = self.model.find_top_k_peaks(DOA_est, self.K).float() - 90
 
         return torch.sqrt(nn.MSELoss()(DOA_est, DOA))
-
-    def smooth_k_hot(self, k_hot, scale):
-        """
-        """
-        B, C = k_hot.shape
-        idxs = torch.arange(C).unsqueeze(0).repeat(C, 1) 
-        centers = torch.arange(C).unsqueeze(1)            
-        laplace_kernel = torch.exp(-torch.abs(idxs - centers) / scale) / (2*scale)
     
-        smoothed = torch.matmul(k_hot, laplace_kernel.to(k_hot.device)) 
+    def init_laplace(self):
+        """
+        """
+        idxs = torch.arange(181, device=self.device).unsqueeze(0).repeat(181, 1) 
+        centers = torch.arange(181, device=self.device).unsqueeze(1)            
+        self.laplace_kernel = torch.exp(-torch.abs(idxs - centers) / self.scale) / (2*self.scale)
+        self.laplace_dist = Laplace(torch.tensor(0.0, device=self.device), torch.tensor(self.scale, device=self.device))
+
+    def smooth_k_hot(self, k_hot):
+        """
+        """
+        smoothed = torch.matmul(k_hot, self.laplace_kernel) 
                 
         return smoothed / smoothed.sum(dim=1, keepdim=True)
         
-    def plot_DOA(self, DOA, DOA_est):
-        """
-        """
-        fig, ax = plt.subplots(2, 2, figsize=(12, 12))
-        fig.suptitle(f"True and predicted DOA distribution at epoch {self.epoch}")
-
-        ax[0,0].plot(DOA[0], label="True DOA")
-        ax[0,0].plot(DOA_est[0], label="Predicted DOA")
-
-        ax[0,1].plot(DOA[1], label="True DOA")
-        ax[0,1].plot(DOA_est[1], label="Predicted DOA")
-        
-        ax[1,0].plot(DOA[2], label="True DOA")
-        ax[1,0].plot(DOA_est[2], label="Predicted DOA")
-        
-        ax[1,1].plot(DOA[3], label="True DOA")
-        ax[1,1].plot(DOA_est[3], label="Predicted DOA")
-
-        #tikzplotlib.save(self.train_path + "/" + "DOA_distributions_epoch_" + str(self.epoch) + ".tex")
-        fig.savefig(self.train_path + "/" + "DOA_distributions_epoch_" + str(self.epoch) + ".pdf", bbox_inches="tight")
-
     def train_epoch(self):
         """
         """
-        pbar = tqdm(total=len(self.train_loader), position=0, leave=True)
+        #pbar = tqdm(total=len(self.train_loader), position=0, leave=True)
 
-        running_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_m_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_r_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_p_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_acc = torch.tensor(0., requires_grad=False).to(self.device)
-        running_rmse = torch.tensor(0., requires_grad=False).to(self.device)
+        running_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_m_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_r_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_p_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_acc = torch.tensor(0., requires_grad=False).to('cpu')
+        running_rmse = torch.tensor(0., requires_grad=False).to('cpu')
 
         for self.i, (batch) in enumerate(self.train_loader):
             
-            X, SCM, SOI, DOA, DOA_k_hot = batch
-            X, SCM, SOI, DOA, DOA_k_hot = X.to(self.device), SCM.to(self.device), SOI.to(self.device), DOA.to(self.device), DOA_k_hot.to(self.device)
+            SCM, X, SOI, DOA, DOA_k_hot = batch
+            SCM, X, SOI, DOA, DOA_k_hot = SCM.to(self.device, non_blocking=True), X.to(self.device, non_blocking=True), SOI.to(self.device, non_blocking=True), DOA.to(self.device, non_blocking=True), DOA_k_hot.to(self.device, non_blocking=True)
             
-            loss, loss_m, loss_r, loss_p, acc, rmse = self.loss_beamformer(X, SCM, SOI, DOA, DOA_k_hot)
+            loss, loss_m, loss_r, loss_p, acc, rmse = self.loss_beamformer(SCM, X, SOI, DOA, DOA_k_hot)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
 
-            running_loss += loss.item()
-            cur_loss = running_loss.item() / (self.i + 1)
+            running_loss += loss.detach().item()
+           # cur_loss = running_loss.item() / (self.i + 1)
 
-            running_m_loss += loss_m.item()
-            cur_m_loss = running_m_loss.item() / (self.i + 1)
+            running_m_loss += loss_m.detach().item()
+           # cur_m_loss = running_m_loss.item() / (self.i + 1)
 
-            running_r_loss += loss_r.item()
-            cur_r_loss = running_r_loss.item() / (self.i + 1)
+            running_r_loss += loss_r.detach().item()
+           # cur_r_loss = running_r_loss.item() / (self.i + 1)
 
-            running_p_loss += loss_p.item()
-            cur_p_loss = running_p_loss.item() / (self.i + 1)
+            running_p_loss += loss_p.detach().item()
+           # cur_p_loss = running_p_loss.item() / (self.i + 1)
             
-            running_acc += acc.item()
-            cur_acc = running_acc.item() / (self.i + 1)
+            running_acc += acc.detach().item()
+           # cur_acc = running_acc.item() / (self.i + 1)
 
-            running_rmse += rmse.item()
-            cur_rmse = running_rmse.item() / (self.i + 1)
+            running_rmse += rmse.detach().item()
+           # cur_rmse = running_rmse.item() / (self.i + 1)
 
-            desc = (f"[{self.epoch+1}] Train - DOA accuracy: {acc.item():.4f} / {cur_acc:.4f}, DOA RMSE: {rmse.item():.4f} / {cur_rmse:.4f}, "
-                    f"Total Loss: {loss.item():.4f} / {cur_loss:.4f}, Regression Loss: {loss_m.item():.4f} / {cur_m_loss:.4f}, "
-                    f"Reconstruction Loss: {loss_r.item():.4f} / {cur_r_loss:.4f}, Power Loss: {loss_p.item():.4f} / {cur_p_loss:.4f}")
-            pbar.set_description(desc)
-            pbar.update()
+        #    desc = (f"[{self.epoch+1}] Train - DOA accuracy: {acc.item():.4f} / {cur_acc:.4f}, DOA RMSE: {rmse.item():.4f} / {cur_rmse:.4f}, "
+         #           f"Total Loss: {loss.item():.4f} / {cur_loss:.4f}, Regression Loss: {loss_m.item():.4f} / {cur_m_loss:.4f}, "
+          #          f"Reconstruction Loss: {loss_r.item():.4f} / {cur_r_loss:.4f}")
+       #     pbar.set_description(desc)
+       #     pbar.update()
 
         self.optimizer_lr_sched.step()
 
-        pbar.close()
+       # pbar.close()
 
         running_loss = running_loss.div_(len(self.train_loader))
         running_m_loss = running_m_loss.div_(len(self.train_loader))
@@ -422,50 +413,50 @@ class Trainer:
         """
         """
         id = self.data_id()
-        torch.save(self.model.state_dict(), self.model_path + "/deepbeamformer" + id + ".pt")
+        torch.save(self.model.state_dict(), self.model_path + "/capsformer" + id + ".pt")
 
-        pbar = tqdm(total=len(self.val_loader), position=0, leave=True)
+       # pbar = tqdm(total=len(self.val_loader), position=0, leave=True)
 
-        running_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_m_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_r_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_p_loss = torch.tensor(0., requires_grad=False).to(self.device)
-        running_acc = torch.tensor(0., requires_grad=False).to(self.device)
-        running_rmse = torch.tensor(0., requires_grad=False).to(self.device)
+        running_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_m_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_r_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_p_loss = torch.tensor(0., requires_grad=False).to('cpu')
+        running_acc = torch.tensor(0., requires_grad=False).to('cpu')
+        running_rmse = torch.tensor(0., requires_grad=False).to('cpu')
 
         with torch.no_grad():
             for self.i, (batch) in enumerate(self.val_loader):
             
-                X, SCM, SOI, DOA, DOA_k_hot = batch
-                X, SCM, SOI, DOA, DOA_k_hot = X.to(self.device), SCM.to(self.device), SOI.to(self.device), DOA.to(self.device), DOA_k_hot.to(self.device)
-                        
-                loss, loss_m, loss_r, loss_p, acc, rmse = self.loss_beamformer(X, SCM, SOI, DOA, DOA_k_hot, "val")
+                SCM, X, SOI, DOA, DOA_k_hot = batch
+                SCM, X, SOI, DOA, DOA_k_hot = SCM.to(self.device, non_blocking=True), X.to(self.device, non_blocking=True), SOI.to(self.device, non_blocking=True), DOA.to(self.device, non_blocking=True), DOA_k_hot.to(self.device, non_blocking=True)
+            
+                loss, loss_m, loss_r, loss_p, acc, rmse = self.loss_beamformer(SCM, X, SOI, DOA, DOA_k_hot, "val")
 
-                running_loss += loss.item()
-                cur_loss = running_loss.item() / (self.i + 1)
+                running_loss += loss.detach().item()
+            # cur_loss = running_loss.item() / (self.i + 1)
 
-                running_m_loss += loss_m.item()
-                cur_m_loss = running_m_loss.item() / (self.i + 1)
+                running_m_loss += loss_m.detach().item()
+            # cur_m_loss = running_m_loss.item() / (self.i + 1)
 
-                running_r_loss += loss_r.item()
-                cur_r_loss = running_r_loss.item() / (self.i + 1)
+                running_r_loss += loss_r.detach().item()
+            # cur_r_loss = running_r_loss.item() / (self.i + 1)
 
-                running_p_loss += loss_p.item()
-                cur_p_loss = running_p_loss.item() / (self.i + 1)
+                running_p_loss += loss_p.detach().item()
+            # cur_p_loss = running_p_loss.item() / (self.i + 1)
                 
-                running_acc += acc.item()
-                cur_acc = running_acc.item() / (self.i + 1)
+                running_acc += acc.detach().item()
+            # cur_acc = running_acc.item() / (self.i + 1)
 
-                running_rmse += rmse.item()
-                cur_rmse = running_rmse.item() / (self.i + 1)
+                running_rmse += rmse.detach().item()
+            #    cur_rmse = running_rmse.item() / (self.i + 1)
 
-                desc = (f"[{self.epoch+1}] Validation - DOA accuracy: {acc.item():.4f} / {cur_acc:.4f}, DOA RMSE: {rmse.item():.4f} / {cur_rmse:.4f}, "
-                        f"Total Loss: {loss.item():.4f} / {cur_loss:.4f}, Regression Loss: {loss_m.item():.4f} / {cur_m_loss:.4f}, "
-                        f"Reconstruction Loss: {loss_r.item():.4f} / {cur_r_loss:.4f}, Power Loss: {loss_p.item():.4f} / {cur_p_loss:.4f}")
-                pbar.set_description(desc)
-                pbar.update()
+             #   desc = (f"[{self.epoch+1}] Validation - DOA accuracy: {acc.item():.4f} / {cur_acc:.4f}, DOA RMSE: {rmse.item():.4f} / {cur_rmse:.4f}, "
+              #          f"Total Loss: {loss.item():.4f} / {cur_loss:.4f}, Regression Loss: {loss_m.item():.4f} / {cur_m_loss:.4f}, "
+               #         f"Reconstruction Loss: {loss_r.item():.4f} / {cur_r_loss:.4f}")
+               # pbar.set_description(desc)
+               # pbar.update()
 
-            pbar.close()
+           # pbar.close()
             running_loss = running_loss.div_(len(self.val_loader))
             running_m_loss = running_m_loss.div_(len(self.val_loader))
             running_r_loss = running_r_loss.div_(len(self.val_loader))

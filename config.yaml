@@ -16,6 +16,8 @@ train:
   num_epochs: 50
   batch_size: 256
   scale: 5.0
+  lambda_1: 1.0
+  lambda_2: 1.e-3
   wd: 0.0
   lr: 4.e-4 
   lr_gamma: 0.5
