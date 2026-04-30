@@ -40,4 +40,4 @@ if __name__  == "__main__":
     
     if TEST:
         tester = Tester(**{**array_cfg, **data_cfg, **rng_cfg, **dir_cfg})
-        tester.compare_metrics(mode="m", DOAs=np.array([-55.2, 14.4]), DOAs_SOI=None, DOAs_SOI_perturb=False, SNRs=np.array([[-10, -6], [-8, -4], [-6, -2], [-4, 0], [-2, 2], [0, 4], [2, 6], [4, 8], [6, 10], [8, 12], [10, 14]]), MC_trials=500)
+        #tester.compare_metrics(mode="m", DOAs=np.array([-55.2, 14.4]), DOAs_SOI=None, DOAs_SOI_perturb=False, SNRs=np.array([[-10, -6], [-8, -4], [-6, -2], [-4, 0], [-2, 2], [0, 4], [2, 6], [4, 8], [6, 10], [8, 12], [10, 14]]), MC_trials=500)
